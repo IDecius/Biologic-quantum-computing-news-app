@@ -87,6 +87,23 @@ class ParseFeedTests(unittest.TestCase):
         self.assertEqual(query["gl"], ["GB"])
         self.assertEqual(query["ceid"], ["GB:en"])
 
+    def test_rss_request_uses_browser_user_agent(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = (
+            b"<rss><channel></channel></rss>"
+        )
+
+        with (
+            patch("news.FEED_SEARCHES", ('"quantum biology"',)),
+            patch("news.FEED_LOCALES", (("en-US", "US", "US:en"),)),
+            patch("news.urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            with self.assertRaisesRegex(NewsError, "Aucune nouvelle pertinente"):
+                fetch_articles()
+
+        request = urlopen.call_args.args[0]
+        self.assertTrue(request.get_header("User-agent").startswith("Mozilla/5.0"))
+
     def test_recent_filter_keeps_only_known_dates_within_one_calendar_month(self) -> None:
         now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
         articles = [
@@ -189,12 +206,19 @@ class ParseFeedTests(unittest.TestCase):
             "https://news.google.com/rss/articles/example"
         )
 
-        with patch("news.urllib.request.urlopen", return_value=response):
+        with patch("news.urllib.request.urlopen", return_value=response) as urlopen:
             text = _fetch_article_text(
                 "https://news.google.com/rss/articles/example"
             )
 
         self.assertEqual(text, "")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.get_header("User-agent"),
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36",
+        )
 
     def test_decodes_editor_urls_from_google_news_batch_response(self) -> None:
         result = [
@@ -270,6 +294,7 @@ class ParseFeedTests(unittest.TestCase):
         self.assertEqual(len(points), 5)
         self.assertEqual([point["article_index"] for point in points], [1, 2, 3, 4, 5])
         self.assertEqual(points[0]["summary"], "RSS excerpt 1")
+        self.assertEqual(points[0]["provider"], "Extrait local (sans IA)")
 
     def test_local_summary_uses_detailed_article_text_when_available(self) -> None:
         article = Article(
@@ -293,6 +318,7 @@ class ParseFeedTests(unittest.TestCase):
         self.assertEqual(len(points), 1)
         self.assertIn("Article body sentence four.", points[0]["summary"])
         self.assertNotIn("Article body sentence five.", points[0]["summary"])
+        self.assertEqual(points[0]["provider"], "Extrait local (sans IA)")
 
     def test_uses_gemini_default_model_and_validates_its_report(self) -> None:
         articles = [
@@ -355,6 +381,7 @@ class ParseFeedTests(unittest.TestCase):
             points = summarize_with_ai(articles)
 
         self.assertEqual(len(points), 5)
+        self.assertEqual(points[0]["provider"], "Gemini")
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
@@ -362,6 +389,7 @@ class ParseFeedTests(unittest.TestCase):
             "models/gemini-3.8-flash:generateContent",
         )
         self.assertEqual(request.get_header("X-goog-api-key"), "test-gemini-key")
+        self.assertTrue(request.get_header("User-agent").startswith("Mozilla/5.0"))
         self.assertNotIn("test-gemini-key", request.full_url)
         request_body = json.loads(request.data)
         prompt_input = request_body["contents"][0]["parts"][0]["text"]
@@ -421,12 +449,14 @@ class ParseFeedTests(unittest.TestCase):
             points = summarize_with_ai(articles)
 
         self.assertEqual(points[0]["summary"], "Résumé Mistral 1")
+        self.assertEqual(points[0]["provider"], "Mistral")
         self.assertEqual(urlopen.call_count, 1)
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
             "https://api.mistral.ai/v1/chat/completions",
         )
+        self.assertTrue(request.get_header("User-agent").startswith("Mozilla/5.0"))
         self.assertEqual(
             request.get_header("Authorization"),
             "Bearer test-mistral-key",
@@ -476,11 +506,14 @@ class ParseFeedTests(unittest.TestCase):
         ):
             points = summarize_with_ai(articles)
 
-        self.assertEqual(points, gemini_points)
+        self.assertEqual(
+            points,
+            [{**point, "provider": "Gemini"} for point in gemini_points],
+        )
         mistral.assert_called_once()
         gemini.assert_called_once_with(articles, "test-gemini-key")
 
-    def test_falls_back_to_groq_when_mistral_and_gemini_fail(self) -> None:
+    def test_tries_groq_first_then_falls_back_to_mistral(self) -> None:
         articles = [
             Article(
                 title=f"Quantum biology story {index}",
@@ -492,8 +525,8 @@ class ParseFeedTests(unittest.TestCase):
             )
             for index in range(1, 6)
         ]
-        groq_points = [
-            {"article_index": index, "summary": f"Résumé Groq {index}"}
+        mistral_points = [
+            {"article_index": index, "summary": f"Résumé Mistral {index}"}
             for index in range(1, 6)
         ]
 
@@ -515,8 +548,8 @@ class ParseFeedTests(unittest.TestCase):
             patch(
                 "news._summarize_with_chat_completions",
                 side_effect=[
-                    NewsError("Mistral a répondu HTTP 429."),
-                    groq_points,
+                    NewsError("Groq a répondu HTTP 403."),
+                    mistral_points,
                 ],
             ) as chat_completion,
             patch(
@@ -526,29 +559,32 @@ class ParseFeedTests(unittest.TestCase):
         ):
             points = summarize_with_ai(articles)
 
-        self.assertEqual(points, groq_points)
+        self.assertEqual(
+            points,
+            [{**point, "provider": "Mistral"} for point in mistral_points],
+        )
         self.assertEqual(chat_completion.call_count, 2)
         self.assertEqual(
             chat_completion.call_args_list[0].kwargs,
+            {
+                "provider": "Groq",
+                "base_url": "https://api.groq.com/openai/v1",
+                "model": "openai/gpt-oss-120b",
+            },
+        )
+        self.assertEqual(
+            chat_completion.call_args_list[1].args[1],
+            "test-mistral-key",
+        )
+        self.assertEqual(
+            chat_completion.call_args_list[1].kwargs,
             {
                 "provider": "Mistral",
                 "base_url": "https://api.mistral.ai/v1",
                 "model": "mistral-small-latest",
             },
         )
-        self.assertEqual(
-            chat_completion.call_args_list[1].args[1],
-            "test-groq-key",
-        )
-        self.assertEqual(
-            chat_completion.call_args_list[1].kwargs,
-            {
-                "provider": "Groq",
-                "base_url": "https://api.groq.com/openai/v1",
-                "model": "llama-3.3-70b-versatile",
-            },
-        )
-        gemini.assert_called_once_with(articles, "test-gemini-key")
+        gemini.assert_not_called()
 
     def test_uses_groq_when_only_the_groq_key_is_configured(self) -> None:
         articles = [
@@ -604,11 +640,13 @@ class ParseFeedTests(unittest.TestCase):
             points = summarize_with_ai(articles)
 
         self.assertEqual(points[0]["summary"], "Résumé Groq 1")
+        self.assertEqual(points[0]["provider"], "Groq")
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
             "https://api.groq.com/openai/v1/chat/completions",
         )
+        self.assertTrue(request.get_header("User-agent").startswith("Mozilla/5.0"))
         self.assertEqual(
             request.get_header("Authorization"),
             "Bearer test-groq-key",
@@ -616,8 +654,180 @@ class ParseFeedTests(unittest.TestCase):
         self.assertNotIn("test-groq-key", request.full_url)
         self.assertEqual(
             json.loads(request.data)["model"],
-            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b",
         )
+
+    def test_retries_only_articles_missing_from_groq_response(self) -> None:
+        articles = [
+            Article(
+                title=f"Quantum biology story {index}",
+                url=f"https://example.org/{index}",
+                source="Research News",
+                description=f"RSS excerpt {index}",
+                published_at=None,
+                relevance=15,
+            )
+            for index in range(1, 3)
+        ]
+
+        def response_with_points(points: list[dict[str, object]]) -> MagicMock:
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps({"points": points})
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            return response
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "MISTRAL_API_KEY": "",
+                    "GEMINI_API_KEY": "",
+                    "GROQ_API_KEY": "test-groq-key",
+                    "GROQ_API_BASE_URL": "",
+                    "GROQ_MODEL": "",
+                    "NEWS_AI_PROVIDER": "",
+                },
+                clear=True,
+            ),
+            patch(
+                "news.urllib.request.urlopen",
+                side_effect=[
+                    response_with_points(
+                        [{"article_index": 1, "summary": "Résumé du premier."}]
+                    ),
+                    response_with_points(
+                        [{"article_index": 1, "summary": "Résumé du second."}]
+                    ),
+                ],
+            ) as urlopen,
+        ):
+            points = summarize_with_ai(articles)
+
+        self.assertEqual(
+            points,
+            [
+                {
+                    "article_index": 1,
+                    "summary": "Résumé du premier.",
+                    "provider": "Groq",
+                },
+                {
+                    "article_index": 2,
+                    "summary": "Résumé du second.",
+                    "provider": "Groq",
+                },
+            ],
+        )
+        self.assertEqual(urlopen.call_count, 2)
+        retry_payload = json.loads(urlopen.call_args_list[1].args[0].data)
+        retry_articles = json.loads(retry_payload["messages"][1]["content"])
+        self.assertEqual(len(retry_articles), 1)
+        self.assertEqual(retry_articles[0]["title"], "Quantum biology story 2")
+
+    def test_splits_groq_requests_after_http_413_and_restores_article_indexes(self) -> None:
+        articles = [
+            Article(
+                title=f"Quantum biology story {index}",
+                url=f"https://example.org/{index}",
+                source="Research News",
+                description=f"RSS excerpt {index}",
+                published_at=None,
+                relevance=15,
+            )
+            for index in range(1, 3)
+        ]
+
+        def response_for(summary: str) -> MagicMock:
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "points": [
+                                            {
+                                                "article_index": 1,
+                                                "summary": summary,
+                                            }
+                                        ]
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            return response
+
+        too_large = urllib.error.HTTPError(
+            "https://api.groq.com/openai/v1/chat/completions",
+            413,
+            "Request too large",
+            {},
+            io.BytesIO(b'{"error":{"message":"Request too large"}}'),
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "MISTRAL_API_KEY": "",
+                    "GEMINI_API_KEY": "",
+                    "GROQ_API_KEY": "test-groq-key",
+                    "GROQ_API_BASE_URL": "",
+                    "GROQ_MODEL": "",
+                    "NEWS_AI_PROVIDER": "",
+                },
+                clear=True,
+            ),
+            patch(
+                "news.urllib.request.urlopen",
+                side_effect=[
+                    too_large,
+                    response_for("Résumé un."),
+                    response_for("Résumé deux."),
+                ],
+            ) as urlopen,
+        ):
+            points = summarize_with_ai(articles)
+
+        self.assertEqual(
+            points,
+            [
+                {
+                    "article_index": 1,
+                    "summary": "Résumé un.",
+                    "provider": "Groq",
+                },
+                {
+                    "article_index": 2,
+                    "summary": "Résumé deux.",
+                    "provider": "Groq",
+                },
+            ],
+        )
+        self.assertEqual(urlopen.call_count, 3)
+        first_payload = json.loads(urlopen.call_args_list[0].args[0].data)
+        first_request_articles = json.loads(first_payload["messages"][1]["content"])
+        self.assertEqual(len(first_request_articles), 2)
+        for call, expected_title in zip(
+            urlopen.call_args_list[1:],
+            ("Quantum biology story 1", "Quantum biology story 2"),
+        ):
+            payload = json.loads(call.args[0].data)
+            request_articles = json.loads(payload["messages"][1]["content"])
+            self.assertEqual(len(request_articles), 1)
+            self.assertEqual(request_articles[0]["title"], expected_title)
 
     def test_reports_all_provider_failures_when_fallbacks_fail(self) -> None:
         articles = [
@@ -645,8 +855,8 @@ class ParseFeedTests(unittest.TestCase):
             patch(
                 "news._summarize_with_chat_completions",
                 side_effect=[
-                    NewsError("Mistral a répondu HTTP 429."),
                     NewsError("Groq a répondu HTTP 503."),
+                    NewsError("Mistral a répondu HTTP 429."),
                 ],
             ),
             patch(
@@ -656,7 +866,7 @@ class ParseFeedTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 NewsError,
-                "Mistral indisponible.*Gemini indisponible.*Groq indisponible",
+                "Groq indisponible.*Mistral indisponible.*Gemini indisponible",
             ):
                 summarize_with_ai(articles)
 
@@ -788,6 +998,39 @@ class WindowVisibilityTests(unittest.TestCase):
             text="Recherche des nouvelles…"
         )
         thread.return_value.start.assert_called_once()
+
+    def test_article_display_names_the_summary_provider(self) -> None:
+        widget = NewsWidget.__new__(NewsWidget)
+        widget.report = MagicMock()
+        widget._insert_link = MagicMock()
+        article = Article(
+            title="Quantum biology story",
+            url="https://example.org/story",
+            source="Research News",
+            description="RSS excerpt",
+            published_at=None,
+            relevance=15,
+        )
+
+        widget._display_report(
+            [article],
+            [
+                {
+                    "article_index": 1,
+                    "summary": "Résumé scientifique détaillé.",
+                    "provider": "Groq",
+                }
+            ],
+            [],
+        )
+
+        rendered_text = "".join(
+            call.args[1]
+            for call in widget.report.insert.call_args_list
+            if len(call.args) > 1 and isinstance(call.args[1], str)
+        )
+        self.assertIn("Résumé par : Groq", rendered_text)
+        self.assertIn("Résumé scientifique détaillé.", rendered_text)
 
 
 class StartupTests(unittest.TestCase):

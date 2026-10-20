@@ -62,10 +62,13 @@ powershell -ExecutionPolicy Bypass -File .\install_task.ps1 `
   -ExecutablePath "C:\chemin\vers\ActualitesBiologieQuantique.exe"
 ```
 
-## Résumés par IA : Mistral, Gemini, puis Groq
+## Résumés par IA : Groq, Mistral, puis Gemini
 
-L’application essaie les fournisseurs dans cet ordre : Mistral, Gemini, puis
-Groq. Elle passe au suivant si la clé est absente ou si un appel échoue.
+L’application essaie les fournisseurs dans cet ordre : Groq, Mistral, puis
+Gemini. Elle passe au suivant si la clé est absente ou si un appel échoue.
+Chaque article indique le fournisseur qui a rédigé son résumé. Si aucun
+fournisseur n’est configuré ou si tous échouent, l’application affiche un
+extrait local et précise qu’il n’a pas été rédigé par une IA.
 Dans **Variables d’environnement de votre compte** dans Windows, configurez
 les clés que vous possédez :
 
@@ -76,7 +79,7 @@ GROQ_API_KEY    = votre-cle-groq
 ```
 
 Les modèles par défaut sont `mistral-small-latest`, `gemini-3.8-flash` et
-`llama-3.3-70b-versatile`. Pour personnaliser les modèles Mistral, Gemini et
+`openai/gpt-oss-120b` pour Groq. Pour personnaliser les modèles Mistral, Gemini et
 Groq, définissez respectivement `MISTRAL_MODEL`, `NEWS_AI_MODEL` et
 `GROQ_MODEL`.
 
@@ -104,11 +107,14 @@ accessibles et les transmet au modèle pour produire un résumé plus détaillé
 Les paywalls et les pages qui bloquent l’accès automatique utilisent l’extrait
 RSS à la place et sont signalés dans la section des avertissements. Le texte
 de chaque page est limité à 10 000 caractères et son téléchargement à 1 Mo.
-En cas d’erreur Mistral, l’application tente Gemini, puis Groq si Gemini
+En cas d’erreur Groq, l’application tente Mistral, puis Gemini si Mistral
 échoue aussi. Si tous les fournisseurs configurés échouent, elle indique que
 le résumé français est indisponible et affiche l’extrait original en secours;
 cet extrait peut être en anglais. Les clés sont envoyées aux fournisseurs
 respectifs par HTTPS; elles ne sont pas incluses dans le fichier `.exe`.
+Si Groq refuse une requête trop volumineuse (HTTP 413), l’application la
+fractionne automatiquement en lots plus petits. Si un seul article dépasse
+encore la limite, le fournisseur suivant est essayé.
 Une erreur HTTP 403 de Groq signifie que le serveur refuse l’accès : vérifiez
 que la clé est active et que le bon compte/projet a accès à l’API et au modèle.
 Le code Cloudflare 1010 signale plutôt un blocage de la requête selon la
@@ -117,6 +123,10 @@ Essayez un autre réseau, sans VPN ni proxy si possible. Si le blocage persiste,
 contactez le support Groq avec le Ray ID s’il est disponible, jamais avec la clé.
 Un 429 indique une limite ou un quota atteint; un 503 signale une indisponibilité
 temporaire du service.
+Les requêtes HTTP de l’application utilisent un User-Agent commun de type
+navigateur, y compris celles envoyées aux fournisseurs de résumés. Cela peut
+éviter certains blocages basés sur le User-Agent, sans garantir qu’un blocage
+Cloudflare 1010 soit résolu.
 
 Si une clé a été partagée dans une conversation ou publiée, révoquez-la dans
 Google AI Studio et configurez une nouvelle clé localement. Pour continuer à

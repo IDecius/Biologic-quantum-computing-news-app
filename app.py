@@ -225,15 +225,16 @@ class NewsWidget:
         self.report.delete("1.0", tk.END)
         self.report.insert(tk.END, "Articles et sources\n", "heading")
         summaries = {
-            point["article_index"]: point["summary"] for point in points
+            point["article_index"]: point for point in points
         }
         for index, article in enumerate(articles, start=1):
             self.report.insert(tk.END, f"{index}. ")
             self._insert_link(article.title, article.url)
             details = f"\n   {article.source} · {article.display_date}"
-            summary = summaries.get(index, "")
-            if summary:
-                details += f"\n   {summary}"
+            point = summaries.get(index)
+            if point:
+                details += f"\n   Résumé par : {point.get('provider', 'IA non précisée')}"
+                details += f"\n   {point['summary']}"
             elif article.description:
                 details += f"\n   {article.description}"
             self.report.insert(tk.END, f"{details}\n\n")

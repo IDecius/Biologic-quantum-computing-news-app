@@ -32,8 +32,14 @@ FEED_LOCALES = (
     ("en-CA", "CA", "CA:en"),
     ("fr-CA", "CA", "CA:fr"),
     ("en-AU", "AU", "AU:en"),
+    ("fr-FR", "FR", "FR:fr"),
 )
 FEED_URL = "https://news.google.com/rss/search"
+HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 MAX_ARTICLES = 10
 FEED_MAX_WORKERS = 10
 MAX_ARTICLE_BYTES = 1_000_000
@@ -242,7 +248,7 @@ def _fetch_article_text(url: str) -> str:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (compatible; ActualitesBiologieQuantique/1.0)",
+            "User-Agent": HTTP_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml",
         },
     )
@@ -297,7 +303,7 @@ def _fetch_google_signature(
     )
     request = urllib.request.Request(
         params_url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; ActualitesBiologieQuantique/1.0)"},
+        headers={"User-Agent": HTTP_USER_AGENT},
     )
     with urllib.request.urlopen(request, timeout=12) as response:
         page = response.read(MAX_ARTICLE_BYTES + 1).decode("utf-8", errors="replace")
@@ -409,7 +415,7 @@ def _resolve_google_news_urls(
         data=form,
         headers={
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "User-Agent": "Mozilla/5.0 (compatible; ActualitesBiologieQuantique/1.0)",
+            "User-Agent": HTTP_USER_AGENT,
         },
         method="POST",
     )
@@ -588,7 +594,7 @@ def fetch_articles() -> tuple[list[Article], list[str]]:
     def fetch_feed(query: str, locale: tuple[str, str, str]) -> list[Article]:
         request = urllib.request.Request(
             _feed_url(query, locale),
-            headers={"User-Agent": "ActualitesQuantiqueBiologique/1.0"},
+            headers={"User-Agent": HTTP_USER_AGENT},
         )
         with urllib.request.urlopen(request, timeout=20) as response:
             return parse_feed(response.read())
@@ -651,7 +657,13 @@ def summarize_from_feed(articles: list[Article]) -> list[dict[str, Any]]:
             summary = article.description or (
                 "Aucun extrait ni texte d’article n’est disponible."
             )
-        points.append({"article_index": index, "summary": summary})
+        points.append(
+            {
+                "article_index": index,
+                "summary": summary,
+                "provider": "Extrait local (sans IA)",
+            }
+        )
     return points
 
 
@@ -707,6 +719,7 @@ def _summarize_with_gemini(
         headers={
             "x-goog-api-key": api_key,
             "Content-Type": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
         },
         method="POST",
     )
@@ -732,6 +745,7 @@ def _summarize_with_chat_completions(
     provider: str,
     base_url: str,
     model: str,
+    retry_missing: bool = True,
 ) -> list[dict[str, Any]]:
     prompt = (
         "Tu es un rédacteur scientifique prudent. Pour chaque article, "
@@ -771,6 +785,7 @@ def _summarize_with_chat_completions(
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
         },
         method="POST",
     )
@@ -780,12 +795,71 @@ def _summarize_with_chat_completions(
         content = result["choices"][0]["message"]["content"]
         points = json.loads(content)["points"]
     except urllib.error.HTTPError as exc:
+        if exc.code == 413 and len(articles) > 1:
+            exc.close()
+            midpoint = len(articles) // 2
+            first_half = _summarize_with_chat_completions(
+                articles[:midpoint],
+                api_key,
+                provider=provider,
+                base_url=base_url,
+                model=model,
+                retry_missing=retry_missing,
+            )
+            second_half = _summarize_with_chat_completions(
+                articles[midpoint:],
+                api_key,
+                provider=provider,
+                base_url=base_url,
+                model=model,
+                retry_missing=retry_missing,
+            )
+            return first_half + [
+                {
+                    **point,
+                    "article_index": point["article_index"] + midpoint,
+                }
+                for point in second_half
+            ]
         raise _provider_http_error(provider, exc, api_key) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise NewsError(f"Le service {provider} est inaccessible : {exc}") from exc
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise NewsError(f"La réponse de {provider} est invalide.") from exc
-    return _validate_points(points, articles)
+    validated = _validate_points(
+        points,
+        articles,
+        require_all=not retry_missing,
+    )
+    if not retry_missing:
+        return validated
+
+    summaries_by_index = {
+        point["article_index"]: point["summary"] for point in validated
+    }
+    missing_indexes = [
+        index
+        for index in range(1, len(articles) + 1)
+        if index not in summaries_by_index
+    ]
+    if not missing_indexes:
+        return validated
+
+    missing_articles = [articles[index - 1] for index in missing_indexes]
+    retry_points = _summarize_with_chat_completions(
+        missing_articles,
+        api_key,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        retry_missing=False,
+    )
+    for original_index, retry_point in zip(missing_indexes, retry_points):
+        summaries_by_index[original_index] = retry_point["summary"]
+    return [
+        {"article_index": index, "summary": summaries_by_index[index]}
+        for index in range(1, len(articles) + 1)
+    ]
 
 
 def _provider_http_error(
@@ -861,16 +935,33 @@ def _provider_http_error(
             ". Le service est temporairement indisponible; l’application "
             "essaie le fournisseur suivant."
         )
+    elif error.code == 413:
+        message += (
+            ". Même une requête réduite à un seul article dépasse la limite "
+            "du modèle; raccourcissez le texte de l’article ou configurez "
+            "un modèle avec une limite de contexte plus élevée."
+        )
     return NewsError(message)
 
 
 def summarize_with_ai(articles: list[Article]) -> list[dict[str, Any]]:
-    """Try Mistral, Gemini, then Groq before legacy provider configuration."""
+    """Try Groq, Mistral, then Gemini before legacy provider configuration."""
     mistral_key = os.environ.get("MISTRAL_API_KEY", "").strip()
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
 
     providers: list[tuple[str, str, str, str]] = []
+    if groq_key:
+        providers.append(
+            (
+                "Groq",
+                groq_key,
+                os.environ.get("GROQ_API_BASE_URL", "").strip()
+                or "https://api.groq.com/openai/v1",
+                os.environ.get("GROQ_MODEL", "").strip()
+                or "openai/gpt-oss-120b",
+            )
+        )
     if mistral_key:
         providers.append(
             (
@@ -884,30 +975,21 @@ def summarize_with_ai(articles: list[Article]) -> list[dict[str, Any]]:
         )
     if gemini_key:
         providers.append(("Gemini", gemini_key, "", ""))
-    if groq_key:
-        providers.append(
-            (
-                "Groq",
-                groq_key,
-                os.environ.get("GROQ_API_BASE_URL", "").strip()
-                or "https://api.groq.com/openai/v1",
-                os.environ.get("GROQ_MODEL", "").strip()
-                or "llama-3.3-70b-versatile",
-            )
-        )
 
     provider_errors: list[str] = []
     for provider, api_key, base_url, model in providers:
         try:
             if provider == "Gemini":
-                return _summarize_with_gemini(articles, api_key)
-            return _summarize_with_chat_completions(
-                articles,
-                api_key,
-                provider=provider,
-                base_url=base_url,
-                model=model,
-            )
+                points = _summarize_with_gemini(articles, api_key)
+            else:
+                points = _summarize_with_chat_completions(
+                    articles,
+                    api_key,
+                    provider=provider,
+                    base_url=base_url,
+                    model=model,
+                )
+            return _label_summary_provider(points, provider)
         except NewsError as exc:
             provider_errors.append(f"{provider} indisponible : {exc}")
 
@@ -927,7 +1009,9 @@ def summarize_with_ai(articles: list[Article]) -> list[dict[str, Any]]:
     if provider == "gemini":
         if not gemini_key:
             raise NewsError("La clé Gemini est introuvable (GEMINI_API_KEY).")
-        return _summarize_with_gemini(articles, gemini_key)
+        return _label_summary_provider(
+            _summarize_with_gemini(articles, gemini_key), "Gemini"
+        )
     if provider != "openai":
         raise NewsError(
             "Fournisseur IA inconnu. Choisissez 'gemini' ou 'openai' "
@@ -936,19 +1020,31 @@ def summarize_with_ai(articles: list[Article]) -> list[dict[str, Any]]:
     if not api_key:
         raise NewsError("La clé OpenAI est introuvable (NEWS_AI_API_KEY).")
 
-    return _summarize_with_chat_completions(
-        articles,
-        api_key,
-        provider="OpenAI",
-        base_url=os.environ.get(
-            "NEWS_AI_BASE_URL", "https://api.openai.com/v1"
+    return _label_summary_provider(
+        _summarize_with_chat_completions(
+            articles,
+            api_key,
+            provider="OpenAI",
+            base_url=os.environ.get(
+                "NEWS_AI_BASE_URL", "https://api.openai.com/v1"
+            ),
+            model=os.environ.get("NEWS_AI_MODEL", "gpt-4o-mini"),
         ),
-        model=os.environ.get("NEWS_AI_MODEL", "gpt-4o-mini"),
+        "OpenAI",
     )
 
 
+def _label_summary_provider(
+    points: list[dict[str, Any]], provider: str
+) -> list[dict[str, Any]]:
+    return [{**point, "provider": provider} for point in points]
+
+
 def _validate_points(
-    points: Any, articles: list[Article]
+    points: Any,
+    articles: list[Article],
+    *,
+    require_all: bool = True,
 ) -> list[dict[str, Any]]:
     if not isinstance(points, list):
         raise NewsError("Le rapport du service IA ne contient pas une liste de points.")
@@ -974,6 +1070,12 @@ def _validate_points(
             seen.add(article_index)
 
     expected_indexes = set(range(1, len(articles) + 1))
-    if seen != expected_indexes:
-        raise NewsError("Le rapport IA ne contient pas un résumé pour chaque article.")
+    if require_all and seen != expected_indexes:
+        missing_indexes = ", ".join(
+            str(index) for index in sorted(expected_indexes - seen)
+        )
+        raise NewsError(
+            "Le rapport IA ne contient pas un résumé pour chaque article "
+            f"(indices manquants : {missing_indexes})."
+        )
     return validated
