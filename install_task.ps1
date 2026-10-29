@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$defaultExecutable = Join-Path $projectDirectory "dist\mistral-gemini-groq\ActualitesBiologieQuantique.exe"
+$defaultExecutable = Join-Path $projectDirectory "dist\ActualitesBiologieQuantique.exe"
 
 if (-not $ExecutablePath) {
     $ExecutablePath = $defaultExecutable

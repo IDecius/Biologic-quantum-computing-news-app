@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $environmentPython = Join-Path $projectDirectory ".venv\Scripts\python.exe"
-$executableDirectory = Join-Path $projectDirectory "dist\mistral-gemini-groq"
+$executableDirectory = Join-Path $projectDirectory "dist"
 
 if (-not (Test-Path -LiteralPath $environmentPython -PathType Leaf)) {
     if (-not $PythonExe) {
