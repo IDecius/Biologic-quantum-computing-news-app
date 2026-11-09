@@ -18,14 +18,37 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any
 
-FEED_SEARCHES = (
-    '"quantum biology"',
-    '"quantum computing" bioinformatics OR genomics OR proteins',
-    '"quantum computing" biology "drug discovery"',
-    '"quantum sensing" biology OR biological',
-    '"biologie quantique"',
-    '"informatique quantique" bioinformatique OR biologie',
-)
+@dataclass(frozen=True)
+class NewsCategory:
+    title: str
+    searches: tuple[str, ...]
+
+
+NEWS_CATEGORIES = {
+    "quantum_computing": NewsCategory(
+        title="Informatique quantique",
+        searches=(
+            '"quantum computing"',
+            '"quantum computer"',
+            '"quantum processor"',
+            '"quantum algorithm"',
+            '"informatique quantique"',
+            '"ordinateur quantique"',
+        ),
+    ),
+    "world_models": NewsCategory(
+        title="Modèles du monde (IA)",
+        searches=(
+            '"world model" AI',
+            '"world models" artificial intelligence',
+            '"world model" robotics',
+            '"world model" generative',
+            '"modèle du monde" IA',
+            '"modèles du monde" intelligence artificielle',
+        ),
+    ),
+}
+DEFAULT_CATEGORY = "quantum_computing"
 FEED_LOCALES = (
     ("en-US", "US", "US:en"),
     ("en-GB", "GB", "GB:en"),
@@ -63,50 +86,17 @@ GOOGLE_ARTICLE_CONTEXT = [
     0,
 ]
 
-QUANTUM_TERMS = ("quantum", "quantique", "quantiques")
-BIOLOGY_TERMS = (
-    "bioinformatics",
-    "bioinformatique",
-    "biology",
-    "biological",
-    "biologie",
-    "biomolecular",
-    "genomics",
-    "genomic",
-    "genomique",
-    "genomiques",
-    "protein",
-    "proteins",
-    "proteine",
-    "proteines",
-    "molecular",
-    "molecule",
-    "molecules",
-    "moleculaire",
-    "biomedical",
-    "biomedicale",
-    "biomedicales",
-    "photosynthesis",
-    "photosynthese",
-    "enzyme",
-    "enzymes",
-    "drug discovery",
-    "life sciences",
+QUANTUM_COMPUTING_PATTERN = re.compile(
+    r"\bquantum\s+(?:comput(?:ing|er|ers)|"
+    r"processor|processors|algorithm|algorithms|chip|chips|circuit|circuits)\b"
+    r"|\b(?:informatique|calcul|ordinateur|processeur|algorithme|"
+    r"circuit|puce)s?\s+quantiques?\b",
+    re.IGNORECASE,
 )
-COMPUTING_TERMS = (
-    "quantum computing",
-    "quantum computer",
-    "computing",
-    "computational",
-    "computation",
-    "bioinformatics",
-    "bioinformatique",
-    "informatique quantique",
-    "calcul quantique",
-    "ordinateur quantique",
-    "algorithm",
-    "algorithme",
-    "qubit",
+WORLD_MODEL_PATTERN = re.compile(
+    r"\bworld[-\s]+models?\b|\bmodèles?\s+du\s+monde\b"
+    r"|\bmodeles?\s+du\s+monde\b",
+    re.IGNORECASE,
 )
 
 
@@ -494,18 +484,26 @@ def _parse_date(value: str | None) -> datetime | None:
     return parsed
 
 
-def _score(title: str, description: str, source: str) -> int:
+def _score(
+    title: str,
+    description: str,
+    source: str,
+    category: str = DEFAULT_CATEGORY,
+) -> int:
     text = f"{title} {description} {source}".casefold()
-    quantum_matches = sum(text.count(term) for term in QUANTUM_TERMS)
-    biology_matches = sum(text.count(term) for term in BIOLOGY_TERMS)
-    computing_matches = sum(text.count(term) for term in COMPUTING_TERMS)
-    if not quantum_matches or not biology_matches:
-        return 0
-    return quantum_matches * 10 + biology_matches * 5 + computing_matches * 15
+    if category == "quantum_computing":
+        return len(QUANTUM_COMPUTING_PATTERN.findall(text)) * 20
+    if category == "world_models":
+        return len(WORLD_MODEL_PATTERN.findall(text)) * 20
+    raise NewsError(f"Catégorie d’actualités inconnue : {category}")
 
 
-def parse_feed(xml_data: bytes) -> list[Article]:
-    """Parse one Google News RSS response and keep stories matching both topics."""
+def parse_feed(
+    xml_data: bytes, category: str = DEFAULT_CATEGORY
+) -> list[Article]:
+    """Parse a Google News RSS response and keep stories in the chosen topic."""
+    if category not in NEWS_CATEGORIES:
+        raise NewsError(f"Catégorie d’actualités inconnue : {category}")
     try:
         root = ET.fromstring(xml_data)
     except ET.ParseError as exc:
@@ -520,7 +518,7 @@ def parse_feed(xml_data: bytes) -> list[Article]:
 
         source = (item.findtext("source") or "").strip()
         description = _plain_text(item.findtext("description") or "")
-        relevance = _score(title, description, source)
+        relevance = _score(title, description, source, category)
         if relevance == 0:
             continue
 
@@ -580,14 +578,20 @@ def filter_recent_articles(
     ]
 
 
-def fetch_articles() -> tuple[list[Article], list[str]]:
-    """Fetch international RSS searches and rank stories no older than one month."""
+def fetch_articles(
+    category: str = DEFAULT_CATEGORY,
+) -> tuple[list[Article], list[str]]:
+    """Fetch category-specific feeds and rank recent stories by date and relevance."""
+    category_config = NEWS_CATEGORIES.get(category)
+    if category_config is None:
+        raise NewsError(f"Catégorie d’actualités inconnue : {category}")
+
     by_url: dict[str, Article] = {}
     warnings: list[str] = []
 
     feed_searches = [
         (query, locale)
-        for query in FEED_SEARCHES
+        for query in category_config.searches
         for locale in FEED_LOCALES
     ]
 
@@ -597,7 +601,7 @@ def fetch_articles() -> tuple[list[Article], list[str]]:
             headers={"User-Agent": HTTP_USER_AGENT},
         )
         with urllib.request.urlopen(request, timeout=20) as response:
-            return parse_feed(response.read())
+            return parse_feed(response.read(), category)
 
     with ThreadPoolExecutor(max_workers=FEED_MAX_WORKERS) as executor:
         futures = {
@@ -624,14 +628,12 @@ def fetch_articles() -> tuple[list[Article], list[str]]:
     if not recent_articles:
         details = "\n".join(warnings)
         message = (
-            "Aucune nouvelle pertinente publiée au cours du dernier mois "
+            f"Aucune nouvelle récente pertinente pour « {category_config.title} » "
             "n’a été reçue des flux internationaux."
         )
         if details:
             message = f"{message}\n{details}"
         raise NewsError(message)
-
-    now = datetime.now().astimezone()
 
     def rank(article: Article) -> tuple[float, int]:
         published = article.published_at

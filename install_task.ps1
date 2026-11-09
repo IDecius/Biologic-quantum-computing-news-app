@@ -4,7 +4,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$defaultExecutable = Join-Path $projectDirectory "dist\ActualitesBiologieQuantique.exe"
+$defaultExecutable = Join-Path $projectDirectory "dist\VeilleActualites.exe"
+$legacyTaskNames = @(
+    "Actualites informatique biologique quantique",
+    ("Veille d'actualit" + [char]0x00C3 + [char]0x00A9 + "s scientifiques")
+)
+$taskName = "Veille actualites scientifiques"
 
 if (-not $ExecutablePath) {
     $ExecutablePath = $defaultExecutable
@@ -31,13 +36,19 @@ $settings = New-ScheduledTaskSettingsSet `
     -WakeToRun `
     -MultipleInstances IgnoreNew
 
+foreach ($legacyTaskName in $legacyTaskNames) {
+    if (Get-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:$false
+    }
+}
+
 Register-ScheduledTask `
-    -TaskName "Actualites informatique biologique quantique" `
+    -TaskName $taskName `
     -Action $action `
     -Trigger @($dailyTrigger, $logonTrigger) `
     -Principal $principal `
     -Settings $settings `
-    -Description "Ouvre le widget de veille à 11 h, ou à la prochaine connexion si 11 h a été manqué." `
+    -Description "Ouvre la veille scientifique quantique et IA à 11 h, ou à la prochaine connexion si 11 h a été manqué." `
     -Force | Out-Null
 
-Write-Host "Tâche planifiée à 11 h et à la connexion Windows."
+Write-Host "Tâche Veille d'actualités planifiée à 11 h et à la connexion Windows."

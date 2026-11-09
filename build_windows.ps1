@@ -35,7 +35,7 @@ try {
         --noconfirm `
         --onefile `
         --windowed `
-        --name ActualitesBiologieQuantique `
+        --name VeilleActualites `
         --distpath $executableDirectory `
         --workpath .\build `
         --specpath .\build `
@@ -44,7 +44,7 @@ try {
         throw "La création de l’exécutable a échoué."
     }
 
-    Write-Host "Exécutable créé : $(Join-Path $executableDirectory 'ActualitesBiologieQuantique.exe')"
+    Write-Host "Exécutable créé : $(Join-Path $executableDirectory 'VeilleActualites.exe')"
 } finally {
     Pop-Location
 }

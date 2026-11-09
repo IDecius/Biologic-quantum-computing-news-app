@@ -21,6 +21,8 @@ from app import (
 )
 from news import (
     Article,
+    NEWS_CATEGORIES,
+    NewsCategory,
     NewsError,
     _decode_google_batch_response,
     _feed_url,
@@ -40,9 +42,9 @@ class ParseFeedTests(unittest.TestCase):
     def test_parses_relevant_story_and_removes_markup(self) -> None:
         feed = b"""<?xml version="1.0"?>
         <rss version="2.0"><channel><item>
-          <title>Quantum computing advances bioinformatics</title>
+          <title>Quantum computing advances quantum processor design</title>
           <link>https://example.org/story</link>
-          <description>&lt;p&gt;A new quantum method for genomic analysis.&lt;/p&gt;</description>
+          <description>&lt;p&gt;A new quantum computing method for scalable processors.&lt;/p&gt;</description>
           <source>Research News</source>
           <pubDate>Thu, 15 Oct 2026 17:14:33 GMT</pubDate>
         </item></channel></rss>"""
@@ -50,15 +52,21 @@ class ParseFeedTests(unittest.TestCase):
         articles = parse_feed(feed)
 
         self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].title, "Quantum computing advances bioinformatics")
-        self.assertEqual(articles[0].description, "A new quantum method for genomic analysis.")
+        self.assertEqual(
+            articles[0].title,
+            "Quantum computing advances quantum processor design",
+        )
+        self.assertEqual(
+            articles[0].description,
+            "A new quantum computing method for scalable processors.",
+        )
         self.assertEqual(articles[0].source, "Research News")
         self.assertGreater(articles[0].relevance, 0)
         self.assertIsNotNone(articles[0].published_at)
 
-    def test_excludes_stories_missing_either_research_area(self) -> None:
+    def test_quantum_tab_excludes_stories_without_quantum_computing(self) -> None:
         feed = b"""<rss><channel>
-        <item><title>Quantum computing hardware</title>
+        <item><title>Quantum biology research</title>
           <link>https://example.org/quantum</link></item>
         <item><title>New genomics database</title>
           <link>https://example.org/genomics</link></item>
@@ -66,18 +74,63 @@ class ParseFeedTests(unittest.TestCase):
 
         self.assertEqual(parse_feed(feed), [])
 
-    def test_prioritizes_quantum_computing_applied_to_biology(self) -> None:
+    def test_quantum_tab_prioritizes_quantum_computing(self) -> None:
         feed = b"""<rss><channel><item>
-          <title>Quantum computing for bioinformatics</title>
+          <title>Quantum computing and quantum algorithms</title>
           <link>https://example.org/computing</link>
         </item><item>
-          <title>Quantum biology and molecular biology</title>
-          <link>https://example.org/biology</link>
+          <title>Quantum computing hardware</title>
+          <link>https://example.org/hardware</link>
         </item></channel></rss>"""
 
         articles = parse_feed(feed)
 
         self.assertGreater(articles[0].relevance, articles[1].relevance)
+
+    def test_world_models_tab_only_keeps_world_model_stories(self) -> None:
+        feed = b"""<rss><channel>
+        <item><title>New world model for AI robotics</title>
+          <link>https://example.org/world-model</link></item>
+        <item><title>New language model for robotics</title>
+          <link>https://example.org/language-model</link></item>
+        </channel></rss>"""
+
+        articles = parse_feed(feed, "world_models")
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].url, "https://example.org/world-model")
+
+    def test_fetch_articles_uses_searches_for_requested_category(self) -> None:
+        published = datetime.now(timezone.utc).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        feed = f"""<rss><channel><item>
+        <title>New world model for AI robotics</title>
+        <link>https://example.org/world-model</link>
+        <description>A new world model helps AI agents predict outcomes.</description>
+        <source>Research News</source>
+        <pubDate>{published}</pubDate>
+        </item></channel></rss>""".encode()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = feed
+
+        with (
+            patch("news.FEED_LOCALES", (("en-US", "US", "US:en"),)),
+            patch("news.urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            articles, _warnings = fetch_articles("world_models")
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].url, "https://example.org/world-model")
+        requested_queries = [
+            urllib.parse.parse_qs(
+                urllib.parse.urlparse(call.args[0].full_url).query
+            )["q"][0]
+            for call in urlopen.call_args_list
+        ]
+        self.assertTrue(
+            any("world model" in query for query in requested_queries)
+        )
 
     def test_international_feed_url_uses_requested_language_and_region(self) -> None:
         url = _feed_url('"quantum biology"', ("en-GB", "GB", "GB:en"))
@@ -94,11 +147,20 @@ class ParseFeedTests(unittest.TestCase):
         )
 
         with (
-            patch("news.FEED_SEARCHES", ('"quantum biology"',)),
+            patch(
+                "news.NEWS_CATEGORIES",
+                {
+                    **NEWS_CATEGORIES,
+                    "quantum_computing": NewsCategory(
+                        "Informatique quantique",
+                        ('"quantum computing"',),
+                    ),
+                },
+            ),
             patch("news.FEED_LOCALES", (("en-US", "US", "US:en"),)),
             patch("news.urllib.request.urlopen", return_value=response) as urlopen,
         ):
-            with self.assertRaisesRegex(NewsError, "Aucune nouvelle pertinente"):
+            with self.assertRaisesRegex(NewsError, "Aucune nouvelle récente pertinente"):
                 fetch_articles()
 
         request = urlopen.call_args.args[0]
@@ -136,7 +198,7 @@ class ParseFeedTests(unittest.TestCase):
                 title=title,
                 url=f"https://example.org/{index}",
                 source="Research News",
-                description="Quantum biology research news",
+                description="Quantum computing research news",
                 published_at=published_at,
                 relevance=relevance,
             )
@@ -150,7 +212,16 @@ class ParseFeedTests(unittest.TestCase):
         ]
 
         with (
-            patch("news.FEED_SEARCHES", ()),
+            patch(
+                "news.NEWS_CATEGORIES",
+                {
+                    **NEWS_CATEGORIES,
+                    "quantum_computing": NewsCategory(
+                        "Informatique quantique",
+                        (),
+                    ),
+                },
+            ),
             patch("news.FEED_LOCALES", ()),
             patch(
                 "news.filter_recent_articles",
@@ -967,7 +1038,7 @@ class WindowVisibilityTests(unittest.TestCase):
     def test_first_window_reveal_waits_until_report_is_rendered(self) -> None:
         events: list[str] = []
         widget = self._widget_with_results(
-            ("success", ([], [], []))
+            ("success", [("quantum_computing", [], [], [])])
         )
         widget._display_report.side_effect = lambda *_args: events.append("render")
         widget.root.deiconify.side_effect = lambda: events.append("show")
@@ -980,7 +1051,9 @@ class WindowVisibilityTests(unittest.TestCase):
         widget.loading_indicator.pack_forget.assert_called_once()
 
     def test_first_window_stays_hidden_while_results_are_pending(self) -> None:
-        widget = self._widget_with_results(("success", ([], [], [])))
+        widget = self._widget_with_results(
+            ("success", [("quantum_computing", [], [], [])])
+        )
         widget.results = queue.Queue()
 
         widget._poll_results()
@@ -989,7 +1062,9 @@ class WindowVisibilityTests(unittest.TestCase):
         self.assertFalse(widget.window_visible)
 
     def test_refresh_starts_loading_animation(self) -> None:
-        widget = self._widget_with_results(("success", ([], [], [])))
+        widget = self._widget_with_results(
+            ("success", [("quantum_computing", [], [], [])])
+        )
         with patch("app.threading.Thread") as thread:
             widget.refresh()
 
@@ -1001,7 +1076,8 @@ class WindowVisibilityTests(unittest.TestCase):
 
     def test_article_display_names_the_summary_provider(self) -> None:
         widget = NewsWidget.__new__(NewsWidget)
-        widget.report = MagicMock()
+        report = MagicMock()
+        widget.reports = {"quantum_computing": report}
         widget._insert_link = MagicMock()
         article = Article(
             title="Quantum biology story",
@@ -1013,6 +1089,7 @@ class WindowVisibilityTests(unittest.TestCase):
         )
 
         widget._display_report(
+            "quantum_computing",
             [article],
             [
                 {
@@ -1026,11 +1103,58 @@ class WindowVisibilityTests(unittest.TestCase):
 
         rendered_text = "".join(
             call.args[1]
-            for call in widget.report.insert.call_args_list
+            for call in report.insert.call_args_list
             if len(call.args) > 1 and isinstance(call.args[1], str)
         )
         self.assertIn("Résumé par : Groq", rendered_text)
         self.assertIn("Résumé scientifique détaillé.", rendered_text)
+
+    def test_news_load_populates_both_categories_independently(self) -> None:
+        widget = NewsWidget.__new__(NewsWidget)
+        widget.results = queue.Queue()
+        article = Article(
+            title="Quantum computing advances",
+            url="https://example.org/quantum",
+            source="Research News",
+            description="A quantum computing update.",
+            published_at=None,
+            relevance=20,
+        )
+
+        with (
+            patch(
+                "app.fetch_articles",
+                side_effect=[
+                    ([article], []),
+                    NewsError("No recent world-model news."),
+                ],
+            ) as fetch,
+            patch(
+                "app.fetch_article_bodies",
+                return_value=([article], []),
+            ),
+            patch(
+                "app.summarize_with_ai",
+                return_value=[
+                    {
+                        "article_index": 1,
+                        "summary": "Résumé IA.",
+                        "provider": "Groq",
+                    }
+                ],
+            ),
+        ):
+            widget._load_news()
+
+        fetch.assert_any_call("quantum_computing")
+        fetch.assert_any_call("world_models")
+        result_type, results = widget.results.get_nowait()
+        self.assertEqual(result_type, "success")
+        self.assertEqual(results[0][0], "quantum_computing")
+        self.assertEqual(results[0][1], [article])
+        self.assertEqual(results[1][0], "world_models")
+        self.assertEqual(results[1][1], [])
+        self.assertIn("No recent world-model news.", results[1][3][0])
 
 
 class StartupTests(unittest.TestCase):
@@ -1070,7 +1194,7 @@ class ScheduledDelayTests(unittest.TestCase):
                 _mark_opened_today()
                 self.assertTrue(_already_opened_today())
                 marker = Path(temporary_directory) / (
-                    "ActualitesBiologieQuantique/last-opened.txt"
+                    "VeilleActualites/last-opened.txt"
                 )
                 self.assertEqual(
                     marker.read_text(encoding="utf-8"),

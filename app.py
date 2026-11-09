@@ -1,4 +1,4 @@
-"""Windows desktop widget for a daily quantum-biology news digest."""
+"""Windows desktop widget for recent quantum-computing and AI world-model news."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from typing import Any
 
 from news import (
     Article,
+    DEFAULT_CATEGORY,
+    NEWS_CATEGORIES,
     NewsError,
     fetch_article_bodies,
     fetch_articles,
@@ -33,6 +35,16 @@ def _scheduled_marker_path() -> Path:
         if local_app_data
         else Path.home() / "AppData" / "Local"
     )
+    return base_directory / "VeilleActualites" / "last-opened.txt"
+
+
+def _legacy_scheduled_marker_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base_directory = (
+        Path(local_app_data)
+        if local_app_data
+        else Path.home() / "AppData" / "Local"
+    )
     return base_directory / "ActualitesBiologieQuantique" / "last-opened.txt"
 
 
@@ -41,7 +53,12 @@ def _already_opened_today() -> bool:
     try:
         last_opened = marker.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        return False
+        try:
+            last_opened = _legacy_scheduled_marker_path().read_text(
+                encoding="utf-8"
+            ).strip()
+        except FileNotFoundError:
+            return False
     return last_opened == datetime.now().astimezone().date().isoformat()
 
 
@@ -71,7 +88,7 @@ class NewsWidget:
         self.root = root
         self.window_visible = False
         self.results: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.root.title("Actualités — informatique biologique quantique")
+        self.root.title("Veille — Informatique quantique et IA")
         self.root.geometry("760x720")
         self.root.minsize(560, 420)
         self.root.configure(bg="#f4f6fa")
@@ -86,12 +103,12 @@ class NewsWidget:
         header.pack(fill=tk.X)
         ttk.Label(
             header,
-            text="Actualités quantiques & biologiques",
+            text="Veille scientifique",
             style="Title.TLabel",
         ).pack(anchor=tk.W)
         ttk.Label(
             header,
-            text="Une veille quotidienne en informatique biologique quantique",
+            text="Actualités récentes en informatique quantique et modèles du monde en IA",
             style="Muted.TLabel",
         ).pack(anchor=tk.W, pady=(4, 12))
 
@@ -111,34 +128,55 @@ class NewsWidget:
 
         content = ttk.Frame(root, padding=(20, 0, 20, 18))
         content.pack(fill=tk.BOTH, expand=True)
-        self.report = tk.Text(
-            content,
-            wrap=tk.WORD,
-            relief=tk.FLAT,
-            bg="white",
-            fg="#172033",
-            font=("Segoe UI", 10),
-            padx=16,
-            pady=14,
-            spacing1=3,
-            spacing3=8,
-            cursor="arrow",
-            state=tk.DISABLED,
-        )
-        scrollbar = ttk.Scrollbar(content, orient=tk.VERTICAL, command=self.report.yview)
-        self.report.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.report.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.report.tag_configure("heading", font=("Segoe UI", 12, "bold"), spacing1=12)
-        self.report.tag_configure(
-            "link", foreground="#0759a5", underline=True, spacing1=3
-        )
+        self.notebook = ttk.Notebook(content)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.reports: dict[str, tk.Text] = {}
+        for category, config in NEWS_CATEGORIES.items():
+            tab = ttk.Frame(self.notebook, padding=(8, 10))
+            self.notebook.add(tab, text=config.title)
+            report = tk.Text(
+                tab,
+                wrap=tk.WORD,
+                relief=tk.FLAT,
+                bg="white",
+                fg="#172033",
+                font=("Segoe UI", 10),
+                padx=16,
+                pady=14,
+                spacing1=3,
+                spacing3=8,
+                cursor="arrow",
+                state=tk.DISABLED,
+            )
+            scrollbar = ttk.Scrollbar(
+                tab,
+                orient=tk.VERTICAL,
+                command=report.yview,
+            )
+            report.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            report.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            report.tag_configure(
+                "heading", font=("Segoe UI", 12, "bold"), spacing1=12
+            )
+            report.tag_configure(
+                "link", foreground="#0759a5", underline=True, spacing1=3
+            )
+            self.reports[category] = report
 
         self._write(
-            "Bienvenue ! La veille automatique est planifiée à 11 h lorsque "
-            "Windows est ouvert et que votre session est connectée.\n\n"
-            "Cliquez sur « Actualiser » pour lancer une recherche maintenant."
+            "La veille quotidienne s’ouvre à 11 h lorsque votre session "
+            "Windows est connectée.\n\n"
+            "Cliquez sur « Actualiser » pour rechercher les actualités des "
+            "deux rubriques.",
+            DEFAULT_CATEGORY,
         )
+        for category in NEWS_CATEGORIES:
+            if category != DEFAULT_CATEGORY:
+                self._write(
+                    "Cliquez sur « Actualiser » pour rechercher les actualités.",
+                    category,
+                )
         self.root.after(POLL_INTERVAL_MS, self._poll_results)
         if auto_refresh:
             self.refresh()
@@ -146,11 +184,12 @@ class NewsWidget:
             self.root.deiconify()
             self.window_visible = True
 
-    def _write(self, text: str) -> None:
-        self.report.configure(state=tk.NORMAL)
-        self.report.delete("1.0", tk.END)
-        self.report.insert(tk.END, text)
-        self.report.configure(state=tk.DISABLED)
+    def _write(self, text: str, category: str = DEFAULT_CATEGORY) -> None:
+        report = self.reports[category]
+        report.configure(state=tk.NORMAL)
+        report.delete("1.0", tk.END)
+        report.insert(tk.END, text)
+        report.configure(state=tk.DISABLED)
 
     def refresh(self) -> None:
         if str(self.refresh_button["state"]) == tk.DISABLED:
@@ -162,33 +201,38 @@ class NewsWidget:
         threading.Thread(target=self._load_news, daemon=True).start()
 
     def _load_news(self) -> None:
-        try:
-            articles, warnings = fetch_articles()
-        except NewsError as exc:
-            self.results.put(("error", str(exc)))
-            return
+        category_results = []
+        for category in NEWS_CATEGORIES:
+            try:
+                articles, warnings = fetch_articles(category)
+            except NewsError as exc:
+                category_results.append(
+                    (category, [], [], [f"Recherche impossible : {exc}"])
+                )
+                continue
 
-        articles, body_warnings = fetch_article_bodies(articles)
-        warnings.extend(body_warnings)
-        try:
-            points = summarize_with_ai(articles)
-        except NewsError as exc:
-            points = [
-                {
-                    **point,
-                    "summary": (
-                        "Résumé en français indisponible; extrait original : "
-                        f"{point['summary']}"
-                    ),
-                }
-                for point in summarize_from_feed(articles)
-            ]
-            warnings.append(
-                f"Résumé IA indisponible : {exc} "
-                "Les extraits de secours peuvent rester dans la langue source."
-            )
+            articles, body_warnings = fetch_article_bodies(articles)
+            warnings.extend(body_warnings)
+            try:
+                points = summarize_with_ai(articles)
+            except NewsError as exc:
+                points = [
+                    {
+                        **point,
+                        "summary": (
+                            "Résumé en français indisponible; extrait original : "
+                            f"{point['summary']}"
+                        ),
+                    }
+                    for point in summarize_from_feed(articles)
+                ]
+                warnings.append(
+                    f"Résumé IA indisponible : {exc} "
+                    "Les extraits de secours peuvent rester dans la langue source."
+                )
+            category_results.append((category, articles, points, warnings))
 
-        self.results.put(("success", (articles, points, warnings)))
+        self.results.put(("success", category_results))
 
     def _poll_results(self) -> None:
         try:
@@ -204,11 +248,15 @@ class NewsWidget:
             self.status.configure(text="Échec de la recherche")
             self._write(f"Impossible de récupérer les nouvelles.\n\n{payload}")
         else:
-            articles, points, warnings = payload
-            self._display_report(articles, points, warnings)
-            suffix = f" — {len(warnings)} avertissement(s)" if warnings else ""
+            article_count = 0
+            warning_count = 0
+            for category, articles, points, warnings in payload:
+                self._display_report(category, articles, points, warnings)
+                article_count += len(articles)
+                warning_count += len(warnings)
+            suffix = f" — {warning_count} avertissement(s)" if warning_count else ""
             self.status.configure(
-                text=f"{len(articles)} nouvelle(s) — mis à jour{suffix}"
+                text=f"{article_count} nouvelle(s) — mis à jour{suffix}"
             )
         if not self.window_visible:
             self.root.deiconify()
@@ -217,19 +265,21 @@ class NewsWidget:
 
     def _display_report(
         self,
+        category: str,
         articles: list[Article],
         points: list[dict[str, Any]],
         warnings: list[str],
     ) -> None:
-        self.report.configure(state=tk.NORMAL)
-        self.report.delete("1.0", tk.END)
-        self.report.insert(tk.END, "Articles et sources\n", "heading")
+        report = self.reports[category]
+        report.configure(state=tk.NORMAL)
+        report.delete("1.0", tk.END)
+        report.insert(tk.END, f"{NEWS_CATEGORIES[category].title}\n", "heading")
         summaries = {
             point["article_index"]: point for point in points
         }
         for index, article in enumerate(articles, start=1):
-            self.report.insert(tk.END, f"{index}. ")
-            self._insert_link(article.title, article.url)
+            report.insert(tk.END, f"{index}. ")
+            self._insert_link(report, article.title, article.url)
             details = f"\n   {article.source} · {article.display_date}"
             point = summaries.get(index)
             if point:
@@ -237,24 +287,26 @@ class NewsWidget:
                 details += f"\n   {point['summary']}"
             elif article.description:
                 details += f"\n   {article.description}"
-            self.report.insert(tk.END, f"{details}\n\n")
+            report.insert(tk.END, f"{details}\n\n")
 
+        if not articles:
+            report.insert(tk.END, "Aucune nouvelle récente disponible.\n\n")
         if warnings:
-            self.report.insert(tk.END, "Avertissements\n", "heading")
+            report.insert(tk.END, "Avertissements\n", "heading")
             for warning in warnings:
-                self.report.insert(tk.END, f"• {warning}\n\n")
+                report.insert(tk.END, f"• {warning}\n\n")
 
-        self.report.configure(state=tk.DISABLED)
-        self.report.see("1.0")
+        report.configure(state=tk.DISABLED)
+        report.see("1.0")
 
-    def _insert_link(self, text: str, url: str) -> None:
-        tag = f"link_{self.report.index(tk.END).replace('.', '_')}"
-        self.report.insert(tk.END, text, ("link", tag))
-        self.report.tag_bind(
+    def _insert_link(self, report: tk.Text, text: str, url: str) -> None:
+        tag = f"link_{report.index(tk.END).replace('.', '_')}"
+        report.insert(tk.END, text, ("link", tag))
+        report.tag_bind(
             tag, "<Button-1>", lambda _event, target=url: webbrowser.open(target)
         )
-        self.report.tag_bind(tag, "<Enter>", lambda _event: self.report.configure(cursor="hand2"))
-        self.report.tag_bind(tag, "<Leave>", lambda _event: self.report.configure(cursor="arrow"))
+        report.tag_bind(tag, "<Enter>", lambda _event: report.configure(cursor="hand2"))
+        report.tag_bind(tag, "<Leave>", lambda _event: report.configure(cursor="arrow"))
 
 
 def main() -> None:

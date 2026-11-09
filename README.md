@@ -1,16 +1,15 @@
-# Actualités — informatique biologique quantique
+# Veille scientifique — informatique quantique et modèles du monde en IA
 
-Une petite application de bureau Windows qui rassemble des nouvelles sur la
-biologie quantique, la bioinformatique et les applications biologiques de
-l’informatique quantique. Elle cherche dans les éditions Google Actualités des
-États-Unis, du Royaume-Uni, du Canada (en anglais et en français) et de
-l’Australie, puis affiche uniquement les articles publiés au cours du dernier
-mois calendaire. Les articles dont la date de publication manque ou dépasse
-cette limite sont exclus. Les sources peuvent être en anglais; les résumés
-générés par Gemini sont en français. Les résultats sont classés par date de
-publication, du plus récent au plus ancien; la pertinence départage les
-articles publiés à la même date. Les flux RSS sont destinés à un usage
-personnel comme lecteur d’actualités.
+Application de bureau Windows avec deux onglets : actualités récentes en
+informatique quantique, et actualités récentes sur les modèles du monde en
+intelligence artificielle. Elle recherche dans les éditions Google Actualités
+des États-Unis, du Royaume-Uni, du Canada (en anglais et en français), de
+l’Australie et de la France. Seuls les articles publiés au cours du dernier
+mois calendaire sont affichés; les dates manquantes ou futures sont exclues.
+Les résumés sont en français, indiquent le fournisseur IA utilisé et sont
+classés par date de publication, du plus récent au plus ancien, puis par
+pertinence. Les flux RSS sont destinés à un usage personnel comme lecteur
+d’actualités.
 
 ## Construire l’exécutable Windows
 
@@ -22,11 +21,10 @@ powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
 ```
 
 La première construction télécharge PyInstaller. Le fichier prêt à lancer se
-trouve dans `dist\mistral-gemini-groq\ActualitesBiologieQuantique.exe`. Double-cliquez
-dessus pour ouvrir le widget manuellement; il cherche les nouvelles au
-démarrage. Le nouveau fichier est placé dans un dossier séparé afin de pouvoir
-le construire même si une ancienne version du widget est encore ouverte.
-Aucune installation de Python n’est requise pour utiliser le fichier construit.
+trouve dans `dist\VeilleActualites.exe`. Double-cliquez dessus pour ouvrir le
+widget manuellement; il cherche les nouvelles au démarrage. La construction
+remplace cet EXE sans toucher aux autres fichiers du dossier `dist`.
+Aucune installation de Python n’est requise pour utiliser l’EXE construit.
 Au lancement manuel, une barre animée indique la progression de la recherche
 et des résumés. Pour l’ouverture automatique, la fenêtre reste cachée jusqu’à
 ce que le contenu soit prêt. Le bouton **Actualiser** lance une nouvelle
@@ -40,7 +38,8 @@ Après avoir construit l’exécutable, enregistrez la tâche Windows :
 powershell -ExecutionPolicy Bypass -File .\install_task.ps1
 ```
 
-Le widget s’ouvre à 11 h, heure locale, lorsque la session Windows est ouverte.
+La tâche s’appelle **Veille actualites scientifiques**. Elle ouvre le widget
+à 11 h, heure locale, lorsque la session Windows est ouverte.
 Si l’ordinateur démarre ou si vous vous connectez après 11 h, il s’ouvre à la
 prochaine connexion. Si la connexion a lieu avant 11 h, il attend 11 h. Il ne
 s’ouvre qu’une fois par jour via la tâche automatique. Windows peut réveiller
@@ -59,7 +58,7 @@ la tâche avec `install_task.ps1` en indiquant l’emplacement de l’exécutabl
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install_task.ps1 `
-  -ExecutablePath "C:\chemin\vers\ActualitesBiologieQuantique.exe"
+  -ExecutablePath "C:\chemin\vers\VeilleActualites.exe"
 ```
 
 ## Résumés par IA : Groq, Mistral, puis Gemini
@@ -87,7 +86,7 @@ Vous pouvez ouvrir ce réglage en recherchant « Modifier les variables
 d’environnement de votre compte » dans le menu Démarrer. Après l’avoir
 enregistré, fermez et rouvrez votre session Windows pour que la tâche
 automatique voie la nouvelle configuration. Le lancement manuel de
-`dist\mistral-gemini-groq\ActualitesBiologieQuantique.exe` utilisera aussi ces variables.
+`dist\VeilleActualites.exe` utilisera aussi ces variables.
 Ne collez pas la clé dans le code ni dans une commande qui resterait dans
 l’historique du terminal.
 
