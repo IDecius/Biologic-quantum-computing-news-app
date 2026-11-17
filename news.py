@@ -47,6 +47,19 @@ NEWS_CATEGORIES = {
             '"modèles du monde" intelligence artificielle',
         ),
     ),
+    "computational_engineering": NewsCategory(
+        title="Ingénierie computationnelle",
+        searches=(
+            '"computational engineering"',
+            '"computational mechanics"',
+            '"computational fluid dynamics" engineering',
+            '"engineering simulation"',
+            '"finite element analysis" engineering',
+            '"ingénierie computationnelle"',
+            '"ingénierie numérique" simulation',
+            '"simulation numérique" ingénierie',
+        ),
+    ),
 }
 DEFAULT_CATEGORY = "quantum_computing"
 FEED_LOCALES = (
@@ -96,6 +109,18 @@ QUANTUM_COMPUTING_PATTERN = re.compile(
 WORLD_MODEL_PATTERN = re.compile(
     r"\bworld[-\s]+models?\b|\bmodèles?\s+du\s+monde\b"
     r"|\bmodeles?\s+du\s+monde\b",
+    re.IGNORECASE,
+)
+COMPUTATIONAL_ENGINEERING_PATTERN = re.compile(
+    r"\bcomputational\s+(?:engineering|mechanics|fluid dynamics)\b"
+    r"|\bengineering\s+(?:simulation|simulations|modeling|modelling)\b"
+    r"|\bfinite[-\s]+element(?:s)?(?:\s+analysis)?\b"
+    r"|\bmultiphysics\s+(?:simulation|modeling|modelling)\b"
+    r"|\bingénierie\s+(?:computationnelle|numérique)\b"
+    r"|\bingenierie\s+(?:computationnelle|numerique)\b"
+    r"|\bsimulation\s+numérique\s+(?:en\s+)?ingénierie\b"
+    r"|\bsimulation\s+numerique\s+(?:en\s+)?ingenierie\b"
+    r"|\béléments?\s+finis\b|\belements?\s+finis\b",
     re.IGNORECASE,
 )
 
@@ -495,6 +520,8 @@ def _score(
         return len(QUANTUM_COMPUTING_PATTERN.findall(text)) * 20
     if category == "world_models":
         return len(WORLD_MODEL_PATTERN.findall(text)) * 20
+    if category == "computational_engineering":
+        return len(COMPUTATIONAL_ENGINEERING_PATTERN.findall(text)) * 20
     raise NewsError(f"Catégorie d’actualités inconnue : {category}")
 
 
@@ -692,9 +719,14 @@ def _summarize_with_gemini(
         "un résumé détaillé de 3 à 5 phrases. Utilise "
         "en priorité le texte de l’article; si celui-ci est vide, utilise son "
         "extrait RSS. N’ajoute aucun fait qui n’est pas présent dans ces textes. "
-        "Retourne exactement un point pour chacun des articles fournis, sans en "
-        "omettre ni en fusionner. Réponds uniquement en JSON avec la forme "
-        '{"points":[{"article_index":1,"summary":"..."}]}. '
+        "Vérifie aussi si un article reprend exactement la même nouvelle qu’un "
+        "article précédent de la liste. Ne considère pas comme doublons deux "
+        "articles qui partagent seulement un thème, ni un article de suivi "
+        "apportant une information substantiellement nouvelle. Pour un doublon, "
+        "indique dans duplicate_of l’indice du premier article qui couvre cette "
+        "nouvelle; sinon, indique null. Retourne exactement un point par article, "
+        "sans en omettre ni en fusionner. Réponds uniquement en JSON avec la forme "
+        '{"points":[{"article_index":1,"summary":"...","duplicate_of":null}]}. '
         "Les indices sont ceux de la liste fournie et commencent à 1."
     )
     content = json.dumps(
@@ -754,10 +786,16 @@ def _summarize_with_chat_completions(
         "peu importe la langue du texte source, rédige en français "
         "un résumé détaillé de 3 à 5 phrases. Utilise en priorité le texte "
         "de l’article; si celui-ci est vide, utilise son extrait RSS. "
-        "N’ajoute aucun fait absent de ces textes. Retourne exactement un "
-        "point pour chaque article fourni, sans en omettre ni en fusionner. "
+        "N’ajoute aucun fait absent de ces textes. Vérifie aussi si un article "
+        "reprend exactement la même nouvelle qu’un article précédent de la "
+        "liste. Ne considère pas comme doublons deux articles qui partagent "
+        "seulement un thème, ni un article de suivi apportant une information "
+        "substantiellement nouvelle. Pour un doublon, indique dans duplicate_of "
+        "l’indice du premier article qui couvre cette nouvelle; sinon, indique "
+        "null. Retourne exactement un point pour chaque article fourni, sans "
+        "en omettre ni en fusionner. "
         "Réponds en JSON avec la forme "
-        '{"points":[{"article_index":1,"summary":"..."}]}. '
+        '{"points":[{"article_index":1,"summary":"...","duplicate_of":null}]}. '
         "Les indices sont ceux de la liste fournie et commencent à 1."
     )
     payload = {
@@ -820,6 +858,11 @@ def _summarize_with_chat_completions(
                 {
                     **point,
                     "article_index": point["article_index"] + midpoint,
+                    **(
+                        {"duplicate_of": point["duplicate_of"] + midpoint}
+                        if isinstance(point.get("duplicate_of"), int)
+                        else {}
+                    ),
                 }
                 for point in second_half
             ]
@@ -836,13 +879,13 @@ def _summarize_with_chat_completions(
     if not retry_missing:
         return validated
 
-    summaries_by_index = {
-        point["article_index"]: point["summary"] for point in validated
+    points_by_index = {
+        point["article_index"]: point for point in validated
     }
     missing_indexes = [
         index
         for index in range(1, len(articles) + 1)
-        if index not in summaries_by_index
+        if index not in points_by_index
     ]
     if not missing_indexes:
         return validated
@@ -857,9 +900,16 @@ def _summarize_with_chat_completions(
         retry_missing=False,
     )
     for original_index, retry_point in zip(missing_indexes, retry_points):
-        summaries_by_index[original_index] = retry_point["summary"]
+        mapped_point = {
+            **retry_point,
+            "article_index": original_index,
+        }
+        duplicate_of = retry_point.get("duplicate_of")
+        if isinstance(duplicate_of, int):
+            mapped_point["duplicate_of"] = missing_indexes[duplicate_of - 1]
+        points_by_index[original_index] = mapped_point
     return [
-        {"article_index": index, "summary": summaries_by_index[index]}
+        points_by_index[index]
         for index in range(1, len(articles) + 1)
     ]
 
@@ -1058,6 +1108,7 @@ def _validate_points(
             continue
         article_index = point.get("article_index")
         summary = point.get("summary")
+        duplicate_of = point.get("duplicate_of")
         if (
             isinstance(article_index, int)
             and not isinstance(article_index, bool)
@@ -1065,10 +1116,21 @@ def _validate_points(
             and article_index not in seen
             and isinstance(summary, str)
             and summary.strip()
+            and "duplicate_of" in point
         ):
-            validated.append(
-                {"article_index": article_index, "summary": summary.strip()}
-            )
+            if duplicate_of is not None:
+                if (
+                    not isinstance(duplicate_of, int)
+                    or isinstance(duplicate_of, bool)
+                    or not 1 <= duplicate_of < article_index
+                ):
+                    continue
+            validated_point = {
+                "article_index": article_index,
+                "summary": summary.strip(),
+                "duplicate_of": duplicate_of,
+            }
+            validated.append(validated_point)
             seen.add(article_index)
 
     expected_indexes = set(range(1, len(articles) + 1))
@@ -1077,7 +1139,8 @@ def _validate_points(
             str(index) for index in sorted(expected_indexes - seen)
         )
         raise NewsError(
-            "Le rapport IA ne contient pas un résumé pour chaque article "
+            "Le rapport IA ne contient pas un résumé et un contrôle des "
+            "doublons pour chaque article "
             f"(indices manquants : {missing_indexes})."
         )
     return validated

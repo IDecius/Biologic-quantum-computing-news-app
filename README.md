@@ -1,15 +1,21 @@
-# Veille scientifique — informatique quantique et modèles du monde en IA
+# Veille scientifique — informatique quantique, modèles du monde en IA et ingénierie computationnelle
 
-Application de bureau Windows avec deux onglets : actualités récentes en
-informatique quantique, et actualités récentes sur les modèles du monde en
-intelligence artificielle. Elle recherche dans les éditions Google Actualités
-des États-Unis, du Royaume-Uni, du Canada (en anglais et en français), de
-l’Australie et de la France. Seuls les articles publiés au cours du dernier
-mois calendaire sont affichés; les dates manquantes ou futures sont exclues.
+Application de bureau Windows avec trois onglets : actualités récentes en
+informatique quantique, actualités sur les modèles du monde en intelligence
+artificielle et avancées en ingénierie computationnelle (notamment mécanique
+numérique, simulation, dynamique des fluides et éléments finis). Elle
+recherche dans les éditions Google Actualités des États-Unis, du Royaume-Uni,
+du Canada (en anglais et en français), de l’Australie et de la France. Seuls
+les articles publiés au cours du dernier mois calendaire sont affichés; les
+dates manquantes ou futures sont exclues.
 Les résumés sont en français, indiquent le fournisseur IA utilisé et sont
 classés par date de publication, du plus récent au plus ancien, puis par
-pertinence. Les flux RSS sont destinés à un usage personnel comme lecteur
-d’actualités.
+pertinence. L’IA vérifie aussi les articles d’une même rubrique pendant chaque
+actualisation; lorsqu’ils couvrent la même nouvelle, l’application conserve le
+plus récent et masque les répétitions. Cette comparaison ne porte pas sur les
+actualisations précédentes. Si aucun fournisseur IA n’est disponible, les
+doublons ne peuvent pas être vérifiés. Les flux RSS sont destinés à un usage
+personnel comme lecteur d’actualités.
 
 ## Construire l’exécutable Windows
 
@@ -68,6 +74,13 @@ Gemini. Elle passe au suivant si la clé est absente ou si un appel échoue.
 Chaque article indique le fournisseur qui a rédigé son résumé. Si aucun
 fournisseur n’est configuré ou si tous échouent, l’application affiche un
 extrait local et précise qu’il n’a pas été rédigé par une IA.
+Lors de cette analyse, l’IA signale aussi les articles qui couvrent la même
+nouvelle qu’un article précédent de la même rubrique. L’article le plus récent
+est conservé, les autres sont masqués et leur nombre apparaît dans les
+avertissements. Deux articles de même thème ne sont pas automatiquement
+considérés comme des doublons; une nouvelle information substantielle doit
+rester visible. La détection se fait uniquement dans une actualisation, pas
+entre les jours.
 Dans **Variables d’environnement de votre compte** dans Windows, configurez
 les clés que vous possédez :
 

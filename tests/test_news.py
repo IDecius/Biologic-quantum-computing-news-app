@@ -100,6 +100,48 @@ class ParseFeedTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].url, "https://example.org/world-model")
 
+    def test_computational_engineering_tab_keeps_relevant_advances(self) -> None:
+        feed = b"""<rss><channel>
+        <item><title>New computational fluid dynamics method for turbine design</title>
+          <link>https://example.org/cfd</link></item>
+        <item><title>New general artificial intelligence model</title>
+          <link>https://example.org/ai</link></item>
+        </channel></rss>"""
+
+        articles = parse_feed(feed, "computational_engineering")
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].url, "https://example.org/cfd")
+
+    def test_computational_engineering_feed_uses_topic_searches(self) -> None:
+        published = datetime.now(timezone.utc).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        feed = f"""<rss><channel><item>
+        <title>New computational engineering method</title>
+        <link>https://example.org/computational-engineering</link>
+        <description>Advances in computational engineering simulation.</description>
+        <source>Research News</source>
+        <pubDate>{published}</pubDate>
+        </item></channel></rss>""".encode()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = feed
+
+        with (
+            patch("news.FEED_LOCALES", (("en-US", "US", "US:en"),)),
+            patch("news.urllib.request.urlopen", return_value=response) as urlopen,
+        ):
+            articles, _warnings = fetch_articles("computational_engineering")
+
+        self.assertEqual(len(articles), 1)
+        requested_queries = [
+            urllib.parse.parse_qs(
+                urllib.parse.urlparse(call.args[0].full_url).query
+            )["q"][0]
+            for call in urlopen.call_args_list
+        ]
+        self.assertTrue(any("computational engineering" in q for q in requested_queries))
+
     def test_fetch_articles_uses_searches_for_requested_category(self) -> None:
         published = datetime.now(timezone.utc).strftime(
             "%a, %d %b %Y %H:%M:%S GMT"
@@ -420,6 +462,11 @@ class ParseFeedTests(unittest.TestCase):
                                             {
                                                 "article_index": index,
                                                 "summary": f"Résumé {index}",
+                                                **(
+                                                    {"duplicate_of": 1}
+                                                    if index == 2
+                                                    else {"duplicate_of": None}
+                                                ),
                                             }
                                             for index in range(1, 6)
                                         ]
@@ -453,6 +500,7 @@ class ParseFeedTests(unittest.TestCase):
 
         self.assertEqual(len(points), 5)
         self.assertEqual(points[0]["provider"], "Gemini")
+        self.assertEqual(points[1]["duplicate_of"], 1)
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
@@ -465,7 +513,9 @@ class ParseFeedTests(unittest.TestCase):
         request_body = json.loads(request.data)
         prompt_input = request_body["contents"][0]["parts"][0]["text"]
         self.assertIn("Full article text with enough detail", prompt_input)
-        self.assertIn("rédige en français", request_body["system_instruction"]["parts"][0]["text"])
+        system_prompt = request_body["system_instruction"]["parts"][0]["text"]
+        self.assertIn("rédige en français", system_prompt)
+        self.assertIn("même nouvelle", system_prompt)
 
     def test_uses_mistral_first_even_if_gemini_was_previously_selected(self) -> None:
         articles = [
@@ -489,6 +539,7 @@ class ParseFeedTests(unittest.TestCase):
                                     {
                                         "article_index": index,
                                         "summary": f"Résumé Mistral {index}",
+                                        "duplicate_of": None,
                                     }
                                     for index in range(1, 6)
                                 ]
@@ -679,6 +730,7 @@ class ParseFeedTests(unittest.TestCase):
                                     {
                                         "article_index": index,
                                         "summary": f"Résumé Groq {index}",
+                                        "duplicate_of": None,
                                     }
                                     for index in range(1, 6)
                                 ]
@@ -773,10 +825,22 @@ class ParseFeedTests(unittest.TestCase):
                 "news.urllib.request.urlopen",
                 side_effect=[
                     response_with_points(
-                        [{"article_index": 1, "summary": "Résumé du premier."}]
+                        [
+                            {
+                                "article_index": 1,
+                                "summary": "Résumé du premier.",
+                                "duplicate_of": None,
+                            }
+                        ]
                     ),
                     response_with_points(
-                        [{"article_index": 1, "summary": "Résumé du second."}]
+                        [
+                            {
+                                "article_index": 1,
+                                "summary": "Résumé du second.",
+                                "duplicate_of": None,
+                            }
+                        ]
                     ),
                 ],
             ) as urlopen,
@@ -789,11 +853,13 @@ class ParseFeedTests(unittest.TestCase):
                 {
                     "article_index": 1,
                     "summary": "Résumé du premier.",
+                    "duplicate_of": None,
                     "provider": "Groq",
                 },
                 {
                     "article_index": 2,
                     "summary": "Résumé du second.",
+                    "duplicate_of": None,
                     "provider": "Groq",
                 },
             ],
@@ -830,6 +896,7 @@ class ParseFeedTests(unittest.TestCase):
                                             {
                                                 "article_index": 1,
                                                 "summary": summary,
+                                                "duplicate_of": None,
                                             }
                                         ]
                                     }
@@ -878,11 +945,13 @@ class ParseFeedTests(unittest.TestCase):
                 {
                     "article_index": 1,
                     "summary": "Résumé un.",
+                    "duplicate_of": None,
                     "provider": "Groq",
                 },
                 {
                     "article_index": 2,
                     "summary": "Résumé deux.",
+                    "duplicate_of": None,
                     "provider": "Groq",
                 },
             ],
@@ -1127,6 +1196,7 @@ class WindowVisibilityTests(unittest.TestCase):
                 side_effect=[
                     ([article], []),
                     NewsError("No recent world-model news."),
+                    NewsError("No recent computational-engineering news."),
                 ],
             ) as fetch,
             patch(
@@ -1155,6 +1225,69 @@ class WindowVisibilityTests(unittest.TestCase):
         self.assertEqual(results[1][0], "world_models")
         self.assertEqual(results[1][1], [])
         self.assertIn("No recent world-model news.", results[1][3][0])
+        self.assertEqual(results[2][0], "computational_engineering")
+        self.assertEqual(results[2][1], [])
+        self.assertIn("No recent computational-engineering news.", results[2][3][0])
+
+    def test_news_load_hides_ai_marked_duplicates_and_remaps_summary_indexes(
+        self,
+    ) -> None:
+        widget = NewsWidget.__new__(NewsWidget)
+        widget.results = queue.Queue()
+        articles = [
+            Article(
+                title=f"Quantum computing update {index}",
+                url=f"https://example.org/{index}",
+                source="Research News",
+                description=f"Update {index}",
+                published_at=None,
+                relevance=20,
+            )
+            for index in range(1, 4)
+        ]
+        points = [
+            {
+                "article_index": 1,
+                "summary": "Résumé du sujet commun.",
+                "provider": "Groq",
+            },
+            {
+                "article_index": 2,
+                "summary": "Résumé répétitif.",
+                "provider": "Groq",
+                "duplicate_of": 1,
+            },
+            {
+                "article_index": 3,
+                "summary": "Résumé d’un autre sujet.",
+                "provider": "Groq",
+            },
+        ]
+
+        with (
+            patch(
+                "app.fetch_articles",
+                side_effect=[
+                    (articles, []),
+                    NewsError("No recent world-model news."),
+                    NewsError("No recent computational-engineering news."),
+                ],
+            ),
+            patch("app.fetch_article_bodies", return_value=(articles, [])),
+            patch("app.summarize_with_ai", return_value=points),
+        ):
+            widget._load_news()
+
+        _result_type, results = widget.results.get_nowait()
+        self.assertEqual(
+            [article.title for article in results[0][1]],
+            ["Quantum computing update 1", "Quantum computing update 3"],
+        )
+        self.assertEqual(
+            [point["article_index"] for point in results[0][2]],
+            [1, 2],
+        )
+        self.assertIn("1 article(s) masqué(s)", results[0][3][-1])
 
 
 class StartupTests(unittest.TestCase):

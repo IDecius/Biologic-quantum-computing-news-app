@@ -28,6 +28,38 @@ from news import (
 POLL_INTERVAL_MS = 100
 
 
+def _filter_duplicate_articles(
+    articles: list[Article], points: list[dict[str, Any]]
+) -> tuple[list[Article], list[dict[str, Any]], int]:
+    duplicate_indexes = {
+        point["article_index"]
+        for point in points
+        if isinstance(point.get("article_index"), int)
+        and not isinstance(point.get("article_index"), bool)
+        and isinstance(point.get("duplicate_of"), int)
+        and not isinstance(point.get("duplicate_of"), bool)
+    }
+    if not duplicate_indexes:
+        return articles, points, 0
+
+    displayed_articles: list[Article] = []
+    displayed_indexes: dict[int, int] = {}
+    for index, article in enumerate(articles, start=1):
+        if index not in duplicate_indexes:
+            displayed_articles.append(article)
+            displayed_indexes[index] = len(displayed_articles)
+
+    displayed_points = [
+        {
+            **point,
+            "article_index": displayed_indexes[point["article_index"]],
+        }
+        for point in points
+        if point["article_index"] in displayed_indexes
+    ]
+    return displayed_articles, displayed_points, len(duplicate_indexes)
+
+
 def _scheduled_marker_path() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     base_directory = (
@@ -88,7 +120,7 @@ class NewsWidget:
         self.root = root
         self.window_visible = False
         self.results: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.root.title("Veille — Informatique quantique et IA")
+        self.root.title("Veille — Informatique quantique, IA et ingénierie")
         self.root.geometry("760x720")
         self.root.minsize(560, 420)
         self.root.configure(bg="#f4f6fa")
@@ -108,7 +140,10 @@ class NewsWidget:
         ).pack(anchor=tk.W)
         ttk.Label(
             header,
-            text="Actualités récentes en informatique quantique et modèles du monde en IA",
+            text=(
+                "Actualités récentes en informatique quantique, modèles du "
+                "monde en IA et ingénierie computationnelle"
+            ),
             style="Muted.TLabel",
         ).pack(anchor=tk.W, pady=(4, 12))
 
@@ -168,7 +203,7 @@ class NewsWidget:
             "La veille quotidienne s’ouvre à 11 h lorsque votre session "
             "Windows est connectée.\n\n"
             "Cliquez sur « Actualiser » pour rechercher les actualités des "
-            "deux rubriques.",
+            "trois rubriques.",
             DEFAULT_CATEGORY,
         )
         for category in NEWS_CATEGORIES:
@@ -228,7 +263,16 @@ class NewsWidget:
                 ]
                 warnings.append(
                     f"Résumé IA indisponible : {exc} "
-                    "Les extraits de secours peuvent rester dans la langue source."
+                    "Les extraits de secours peuvent rester dans la langue source. "
+                    "Les doublons ne peuvent pas être vérifiés."
+                )
+            articles, points, duplicate_count = _filter_duplicate_articles(
+                articles, points
+            )
+            if duplicate_count:
+                warnings.append(
+                    f"{duplicate_count} article(s) masqué(s) : même nouvelle "
+                    "déjà couverte par un article plus récent."
                 )
             category_results.append((category, articles, points, warnings))
 
