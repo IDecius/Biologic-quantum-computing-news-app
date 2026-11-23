@@ -21,8 +21,8 @@ from news import (
     NewsError,
     fetch_article_bodies,
     fetch_articles,
+    summarize_categories_with_ai,
     summarize_from_feed,
-    summarize_with_ai,
 )
 
 POLL_INTERVAL_MS = 100
@@ -236,21 +236,39 @@ class NewsWidget:
         threading.Thread(target=self._load_news, daemon=True).start()
 
     def _load_news(self) -> None:
-        category_results = []
+        articles_by_category: dict[str, list[Article]] = {}
+        warnings_by_category: dict[str, list[str]] = {}
+
         for category in NEWS_CATEGORIES:
             try:
                 articles, warnings = fetch_articles(category)
             except NewsError as exc:
-                category_results.append(
-                    (category, [], [], [f"Recherche impossible : {exc}"])
-                )
+                articles_by_category[category] = []
+                warnings_by_category[category] = [f"Recherche impossible : {exc}"]
                 continue
 
             articles, body_warnings = fetch_article_bodies(articles)
             warnings.extend(body_warnings)
-            try:
-                points = summarize_with_ai(articles)
-            except NewsError as exc:
+            articles_by_category[category] = articles
+            warnings_by_category[category] = warnings
+
+        ai_error: str | None = None
+        try:
+            points_by_category = summarize_categories_with_ai(articles_by_category)
+        except NewsError as exc:
+            ai_error = str(exc)
+            points_by_category = {}
+
+        category_results = []
+        for category in NEWS_CATEGORIES:
+            articles = articles_by_category[category]
+            warnings = warnings_by_category[category]
+
+            if not articles:
+                category_results.append((category, [], [], warnings))
+                continue
+
+            if ai_error is not None:
                 points = [
                     {
                         **point,
@@ -262,10 +280,13 @@ class NewsWidget:
                     for point in summarize_from_feed(articles)
                 ]
                 warnings.append(
-                    f"Résumé IA indisponible : {exc} "
+                    f"Résumé IA indisponible : {ai_error} "
                     "Les extraits de secours peuvent rester dans la langue source. "
                     "Les doublons ne peuvent pas être vérifiés."
                 )
+            else:
+                points = points_by_category.get(category, [])
+
             articles, points, duplicate_count = _filter_duplicate_articles(
                 articles, points
             )

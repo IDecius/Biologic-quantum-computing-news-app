@@ -10,6 +10,7 @@ import html
 from html.parser import HTMLParser
 import json
 import os
+from pathlib import Path
 import re
 import urllib.error
 import urllib.parse
@@ -17,6 +18,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any
+
 
 @dataclass(frozen=True)
 class NewsCategory:
@@ -80,6 +82,7 @@ MAX_ARTICLES = 10
 FEED_MAX_WORKERS = 10
 MAX_ARTICLE_BYTES = 1_000_000
 MAX_ARTICLE_TEXT_CHARS = 10_000
+MAX_AI_INPUT_CHARS = 2_500
 GOOGLE_BATCHEXECUTE_URL = (
     "https://news.google.com/_/DotsSplashUi/data/batchexecute"
 )
@@ -701,7 +704,7 @@ def _article_summary_input(article: Article) -> dict[str, str]:
         "title": article.title,
         "source": article.source,
         "rss_excerpt": article.description,
-        "article_text": article.article_text[:MAX_ARTICLE_TEXT_CHARS],
+        "article_text": article.article_text[:MAX_AI_INPUT_CHARS],
     }
 
 
@@ -1144,3 +1147,106 @@ def _validate_points(
             f"(indices manquants : {missing_indexes})."
         )
     return validated
+
+
+def _summary_cache_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base_dir = (
+        Path(local_app_data)
+        if local_app_data
+        else Path.home() / "AppData" / "Local"
+    )
+    return base_dir / "VeilleActualites" / "summary_cache.json"
+
+
+def _load_summary_cache() -> dict[str, dict[str, Any]]:
+    path = _summary_cache_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_summary_cache(cache: dict[str, dict[str, Any]]) -> None:
+    path = _summary_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        trimmed = dict(list(cache.items())[-300:])
+        path.write_text(
+            json.dumps(trimmed, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def summarize_categories_with_ai(
+    articles_by_category: dict[str, list[Article]],
+    *,
+    use_cache: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    """Summarize all categories in a single AI call using a local URL cache."""
+    cache = _load_summary_cache() if use_cache else {}
+
+    uncached_articles: list[Article] = []
+    url_to_batch_index: dict[str, int] = {}
+
+    for articles in articles_by_category.values():
+        for article in articles:
+            if article.url in cache or article.url in url_to_batch_index:
+                continue
+            uncached_articles.append(article)
+            url_to_batch_index[article.url] = len(uncached_articles)
+
+    batch_results_by_url: dict[str, dict[str, Any]] = {}
+    if uncached_articles:
+        batch_points = summarize_with_ai(uncached_articles)
+        for point in batch_points:
+            idx = point["article_index"] - 1
+            article = uncached_articles[idx]
+            duplicate_of = point.get("duplicate_of")
+            duplicate_url = (
+                uncached_articles[duplicate_of - 1].url
+                if isinstance(duplicate_of, int)
+                and 1 <= duplicate_of <= len(uncached_articles)
+                else None
+            )
+            entry = {
+                "summary": point["summary"],
+                "provider": point.get("provider", "IA"),
+                "duplicate_of_url": duplicate_url,
+            }
+            batch_results_by_url[article.url] = entry
+            if use_cache:
+                cache[article.url] = entry
+
+        if use_cache:
+            _save_summary_cache(cache)
+
+    results_by_category: dict[str, list[dict[str, Any]]] = {}
+    for category, articles in articles_by_category.items():
+        url_to_local_index = {
+            article.url: index for index, article in enumerate(articles, start=1)
+        }
+        category_points: list[dict[str, Any]] = []
+        for index, article in enumerate(articles, start=1):
+            entry = batch_results_by_url.get(article.url) or cache.get(article.url)
+            if not entry:
+                continue
+            dup_url = entry.get("duplicate_of_url")
+            local_dup = url_to_local_index.get(dup_url) if dup_url else None
+            if not isinstance(local_dup, int) or local_dup >= index:
+                local_dup = None
+
+            category_points.append(
+                {
+                    "article_index": index,
+                    "summary": entry["summary"],
+                    "provider": entry.get("provider", "Cache local"),
+                    "duplicate_of": local_dup,
+                }
+            )
+        results_by_category[category] = category_points
+
+    return results_by_category

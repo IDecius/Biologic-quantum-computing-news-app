@@ -34,6 +34,7 @@ from news import (
     parse_feed,
     _provider_http_error,
     summarize_from_feed,
+    summarize_categories_with_ai,
     summarize_with_ai,
 )
 
@@ -516,6 +517,69 @@ class ParseFeedTests(unittest.TestCase):
         system_prompt = request_body["system_instruction"]["parts"][0]["text"]
         self.assertIn("rédige en français", system_prompt)
         self.assertIn("même nouvelle", system_prompt)
+
+    def test_summarize_categories_batches_articles_and_maps_duplicates_locally(
+        self,
+    ) -> None:
+        first = Article(
+            title="Quantum computing update",
+            url="https://example.org/quantum-1",
+            source="Research News",
+            description="First update",
+            published_at=None,
+            relevance=20,
+        )
+        duplicate = Article(
+            title="Quantum computing update repeated",
+            url="https://example.org/quantum-2",
+            source="Research News",
+            description="Same news",
+            published_at=None,
+            relevance=20,
+        )
+        other_category = Article(
+            title="World model update",
+            url="https://example.org/world-model",
+            source="Research News",
+            description="Different category",
+            published_at=None,
+            relevance=20,
+        )
+        with patch(
+            "news.summarize_with_ai",
+            return_value=[
+                {
+                    "article_index": 1,
+                    "summary": "Résumé du sujet.",
+                    "provider": "Groq",
+                    "duplicate_of": None,
+                },
+                {
+                    "article_index": 2,
+                    "summary": "Résumé répétitif.",
+                    "provider": "Groq",
+                    "duplicate_of": 1,
+                },
+                {
+                    "article_index": 3,
+                    "summary": "Résumé distinct.",
+                    "provider": "Groq",
+                    "duplicate_of": None,
+                },
+            ],
+        ) as summarize:
+            results = summarize_categories_with_ai(
+                {
+                    "quantum_computing": [first, duplicate],
+                    "world_models": [other_category],
+                },
+                use_cache=False,
+            )
+
+        summarize.assert_called_once_with([first, duplicate, other_category])
+        self.assertEqual(results["quantum_computing"][1]["duplicate_of"], 1)
+        self.assertEqual(results["world_models"][0]["duplicate_of"], None)
+        self.assertEqual(results["world_models"][0]["article_index"], 1)
 
     def test_uses_mistral_first_even_if_gemini_was_previously_selected(self) -> None:
         articles = [
@@ -1204,20 +1268,25 @@ class WindowVisibilityTests(unittest.TestCase):
                 return_value=([article], []),
             ),
             patch(
-                "app.summarize_with_ai",
-                return_value=[
-                    {
-                        "article_index": 1,
-                        "summary": "Résumé IA.",
-                        "provider": "Groq",
-                    }
-                ],
-            ),
+                "app.summarize_categories_with_ai",
+                return_value={
+                    "quantum_computing": [
+                        {
+                            "article_index": 1,
+                            "summary": "Résumé IA.",
+                            "provider": "Groq",
+                        }
+                    ],
+                    "world_models": [],
+                    "computational_engineering": [],
+                },
+            ) as summarize_categories,
         ):
             widget._load_news()
 
         fetch.assert_any_call("quantum_computing")
         fetch.assert_any_call("world_models")
+        summarize_categories.assert_called_once()
         result_type, results = widget.results.get_nowait()
         self.assertEqual(result_type, "success")
         self.assertEqual(results[0][0], "quantum_computing")
@@ -1274,7 +1343,14 @@ class WindowVisibilityTests(unittest.TestCase):
                 ],
             ),
             patch("app.fetch_article_bodies", return_value=(articles, [])),
-            patch("app.summarize_with_ai", return_value=points),
+            patch(
+                "app.summarize_categories_with_ai",
+                return_value={
+                    "quantum_computing": points,
+                    "world_models": [],
+                    "computational_engineering": [],
+                },
+            ),
         ):
             widget._load_news()
 
