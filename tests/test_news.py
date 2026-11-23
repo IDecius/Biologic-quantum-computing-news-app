@@ -21,6 +21,7 @@ from app import (
 )
 from news import (
     Article,
+    LOCAL_SUMMARY_PROVIDER,
     NEWS_CATEGORIES,
     NewsCategory,
     NewsError,
@@ -1409,6 +1410,205 @@ class ScheduledDelayTests(unittest.TestCase):
                     marker.read_text(encoding="utf-8"),
                     datetime.now().astimezone().date().isoformat(),
                 )
+
+
+def _story(index: int) -> Article:
+    return Article(
+        title=f"Quantum computing story {index}",
+        url=f"https://example.org/story-{index}",
+        source="Research News",
+        description=f"RSS excerpt {index}",
+        published_at=None,
+        relevance=20,
+    )
+
+
+def _chat_response(points: list[dict[str, object]]) -> MagicMock:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(
+        {"choices": [{"message": {"content": json.dumps({"points": points})}}]}
+    ).encode("utf-8")
+    return response
+
+
+def _gemini_response(points: list[dict[str, object]]) -> MagicMock:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(
+        {
+            "candidates": [
+                {"content": {"parts": [{"text": json.dumps({"points": points})}]}}
+            ]
+        }
+    ).encode("utf-8")
+    return response
+
+
+GROQ_ONLY_ENVIRONMENT = {
+    "MISTRAL_API_KEY": "",
+    "GEMINI_API_KEY": "",
+    "GROQ_API_KEY": "test-groq-key",
+    "GROQ_API_BASE_URL": "",
+    "GROQ_MODEL": "",
+    "NEWS_AI_PROVIDER": "",
+}
+
+
+class FewerAiRequestsTests(unittest.TestCase):
+    def test_sloppy_duplicate_flags_do_not_cost_a_second_request(self) -> None:
+        articles = [_story(index) for index in range(1, 4)]
+        points = [
+            {"article_index": 1, "summary": "Un"},
+            {"article_index": 2, "summary": "Deux", "duplicate_of": 99},
+            {"article_index": 3, "summary": "Trois", "duplicate_of": "1"},
+        ]
+
+        with (
+            patch.dict("os.environ", GROQ_ONLY_ENVIRONMENT, clear=True),
+            patch(
+                "news.urllib.request.urlopen",
+                return_value=_chat_response(points),
+            ) as urlopen,
+        ):
+            result = summarize_with_ai(articles)
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual([point["summary"] for point in result], ["Un", "Deux", "Trois"])
+        self.assertEqual([point["duplicate_of"] for point in result], [None] * 3)
+
+    def test_retry_maps_points_returned_out_of_order(self) -> None:
+        articles = [_story(index) for index in range(1, 4)]
+        first = [{"article_index": 1, "summary": "Un", "duplicate_of": None}]
+        retry = [
+            {"article_index": 2, "summary": "Trois", "duplicate_of": None},
+            {"article_index": 1, "summary": "Deux", "duplicate_of": None},
+        ]
+
+        with (
+            patch.dict("os.environ", GROQ_ONLY_ENVIRONMENT, clear=True),
+            patch(
+                "news.urllib.request.urlopen",
+                side_effect=[_chat_response(first), _chat_response(retry)],
+            ) as urlopen,
+        ):
+            result = summarize_with_ai(articles)
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(
+            {point["article_index"]: point["summary"] for point in result},
+            {1: "Un", 2: "Deux", 3: "Trois"},
+        )
+
+    def test_gemini_asks_again_only_for_skipped_articles(self) -> None:
+        articles = [_story(index) for index in range(1, 4)]
+        first = [
+            {"article_index": 1, "summary": "Un", "duplicate_of": None},
+            {"article_index": 3, "summary": "Trois", "duplicate_of": None},
+        ]
+        retry = [{"article_index": 1, "summary": "Deux", "duplicate_of": None}]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "MISTRAL_API_KEY": "",
+                    "GROQ_API_KEY": "",
+                    "GEMINI_API_KEY": "test-gemini-key",
+                    "NEWS_AI_MODEL": "",
+                },
+                clear=True,
+            ),
+            patch(
+                "news.urllib.request.urlopen",
+                side_effect=[_gemini_response(first), _gemini_response(retry)],
+            ) as urlopen,
+        ):
+            result = summarize_with_ai(articles)
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(
+            {point["article_index"]: point["summary"] for point in result},
+            {1: "Un", 2: "Deux", 3: "Trois"},
+        )
+        retry_input = json.loads(
+            json.loads(urlopen.call_args_list[1].args[0].data)["contents"][0][
+                "parts"
+            ][0]["text"]
+        )
+        self.assertEqual([item["title"] for item in retry_input], [articles[1].title])
+
+
+class SummaryUrlCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.cache_path = Path(directory.name) / "summary_cache.json"
+        patcher = patch("news._summary_cache_path", return_value=self.cache_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.articles = {"quantum_computing": [_story(1), _story(2)]}
+
+    @staticmethod
+    def _points(provider: str) -> list[dict[str, object]]:
+        return [
+            {
+                "article_index": index,
+                "summary": f"Résumé {index}",
+                "provider": provider,
+                "duplicate_of": None,
+            }
+            for index in (1, 2)
+        ]
+
+    def test_ai_summaries_are_reused_without_another_request(self) -> None:
+        with patch(
+            "news.summarize_with_ai", return_value=self._points("Groq")
+        ) as summarize:
+            first = summarize_categories_with_ai(self.articles)
+            second = summarize_categories_with_ai(self.articles)
+
+        summarize.assert_called_once()
+        self.assertEqual(second, first)
+        self.assertEqual(second["quantum_computing"][0]["provider"], "Groq")
+
+    def test_local_excerpts_are_shown_but_never_cached(self) -> None:
+        with patch(
+            "news.summarize_with_ai",
+            return_value=self._points(LOCAL_SUMMARY_PROVIDER),
+        ) as local_only:
+            first = summarize_categories_with_ai(self.articles)
+
+        self.assertEqual(first["quantum_computing"][0]["provider"], LOCAL_SUMMARY_PROVIDER)
+        self.assertFalse(self.cache_path.exists())
+
+        # Once an AI key works, the same articles get a real summary.
+        with patch(
+            "news.summarize_with_ai", return_value=self._points("Groq")
+        ) as with_ai:
+            second = summarize_categories_with_ai(self.articles)
+
+        local_only.assert_called_once()
+        with_ai.assert_called_once()
+        self.assertEqual(second["quantum_computing"][0]["provider"], "Groq")
+
+    def test_local_excerpts_saved_by_an_earlier_version_are_ignored(self) -> None:
+        stale = {
+            article.url: {
+                "summary": "Extrait en anglais",
+                "provider": LOCAL_SUMMARY_PROVIDER,
+                "duplicate_of_url": None,
+            }
+            for article in self.articles["quantum_computing"]
+        }
+        self.cache_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        with patch(
+            "news.summarize_with_ai", return_value=self._points("Groq")
+        ) as summarize:
+            result = summarize_categories_with_ai(self.articles)
+
+        summarize.assert_called_once()
+        self.assertEqual(result["quantum_computing"][1]["summary"], "Résumé 2")
+        self.assertEqual(result["quantum_computing"][1]["provider"], "Groq")
 
 
 if __name__ == "__main__":
