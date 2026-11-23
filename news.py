@@ -83,6 +83,7 @@ FEED_MAX_WORKERS = 10
 MAX_ARTICLE_BYTES = 1_000_000
 MAX_ARTICLE_TEXT_CHARS = 10_000
 MAX_AI_INPUT_CHARS = 2_500
+LOCAL_SUMMARY_PROVIDER = "Extrait local (sans IA)"
 GOOGLE_BATCHEXECUTE_URL = (
     "https://news.google.com/_/DotsSplashUi/data/batchexecute"
 )
@@ -693,7 +694,7 @@ def summarize_from_feed(articles: list[Article]) -> list[dict[str, Any]]:
             {
                 "article_index": index,
                 "summary": summary,
-                "provider": "Extrait local (sans IA)",
+                "provider": LOCAL_SUMMARY_PROVIDER,
             }
         )
     return points
@@ -708,8 +709,34 @@ def _article_summary_input(article: Article) -> dict[str, str]:
     }
 
 
+def _complete_missing_points(
+    articles: list[Article],
+    validated: list[dict[str, Any]],
+    summarize_subset: Any,
+) -> list[dict[str, Any]]:
+    """Ask once more, in a single request, only for the articles the model skipped."""
+    points_by_index = {point["article_index"]: point for point in validated}
+    missing_indexes = [
+        index
+        for index in range(1, len(articles) + 1)
+        if index not in points_by_index
+    ]
+    if not missing_indexes:
+        return validated
+
+    retry_points = summarize_subset([articles[index - 1] for index in missing_indexes])
+    for retry_point in retry_points:
+        original_index = missing_indexes[retry_point["article_index"] - 1]
+        mapped_point = {**retry_point, "article_index": original_index}
+        duplicate_of = retry_point.get("duplicate_of")
+        if isinstance(duplicate_of, int):
+            mapped_point["duplicate_of"] = missing_indexes[duplicate_of - 1]
+        points_by_index[original_index] = mapped_point
+    return [points_by_index[index] for index in range(1, len(articles) + 1)]
+
+
 def _summarize_with_gemini(
-    articles: list[Article], api_key: str
+    articles: list[Article], api_key: str, *, retry_missing: bool = True
 ) -> list[dict[str, Any]]:
     base_url = os.environ.get(
         "GEMINI_API_BASE_URL",
@@ -772,7 +799,14 @@ def _summarize_with_gemini(
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise NewsError("La réponse de Gemini est invalide.") from exc
 
-    return _validate_points(points, articles)
+    validated = _validate_points(points, articles, require_all=not retry_missing)
+    if not retry_missing:
+        return validated
+    return _complete_missing_points(
+        articles,
+        validated,
+        lambda subset: _summarize_with_gemini(subset, api_key, retry_missing=False),
+    )
 
 
 def _summarize_with_chat_completions(
@@ -881,40 +915,18 @@ def _summarize_with_chat_completions(
     )
     if not retry_missing:
         return validated
-
-    points_by_index = {
-        point["article_index"]: point for point in validated
-    }
-    missing_indexes = [
-        index
-        for index in range(1, len(articles) + 1)
-        if index not in points_by_index
-    ]
-    if not missing_indexes:
-        return validated
-
-    missing_articles = [articles[index - 1] for index in missing_indexes]
-    retry_points = _summarize_with_chat_completions(
-        missing_articles,
-        api_key,
-        provider=provider,
-        base_url=base_url,
-        model=model,
-        retry_missing=False,
+    return _complete_missing_points(
+        articles,
+        validated,
+        lambda subset: _summarize_with_chat_completions(
+            subset,
+            api_key,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            retry_missing=False,
+        ),
     )
-    for original_index, retry_point in zip(missing_indexes, retry_points):
-        mapped_point = {
-            **retry_point,
-            "article_index": original_index,
-        }
-        duplicate_of = retry_point.get("duplicate_of")
-        if isinstance(duplicate_of, int):
-            mapped_point["duplicate_of"] = missing_indexes[duplicate_of - 1]
-        points_by_index[original_index] = mapped_point
-    return [
-        points_by_index[index]
-        for index in range(1, len(articles) + 1)
-    ]
 
 
 def _provider_http_error(
@@ -1119,15 +1131,16 @@ def _validate_points(
             and article_index not in seen
             and isinstance(summary, str)
             and summary.strip()
-            and "duplicate_of" in point
         ):
-            if duplicate_of is not None:
-                if (
-                    not isinstance(duplicate_of, int)
-                    or isinstance(duplicate_of, bool)
-                    or not 1 <= duplicate_of < article_index
-                ):
-                    continue
+            # Dropping a usable summary because of its duplicate flag would
+            # cost another AI request: an absent or invalid duplicate_of just
+            # means "keep the article visible".
+            if (
+                not isinstance(duplicate_of, int)
+                or isinstance(duplicate_of, bool)
+                or not 1 <= duplicate_of < article_index
+            ):
+                duplicate_of = None
             validated_point = {
                 "article_index": article_index,
                 "summary": summary.strip(),
@@ -1163,9 +1176,18 @@ def _load_summary_cache() -> dict[str, dict[str, Any]]:
     path = _summary_cache_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    # Local excerpts saved by earlier versions must not block a real AI summary.
+    return {
+        url: entry
+        for url, entry in data.items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("summary"), str)
+        and entry.get("provider") != LOCAL_SUMMARY_PROVIDER
+    }
 
 
 def _save_summary_cache(cache: dict[str, dict[str, Any]]) -> None:
@@ -1200,6 +1222,7 @@ def summarize_categories_with_ai(
             url_to_batch_index[article.url] = len(uncached_articles)
 
     batch_results_by_url: dict[str, dict[str, Any]] = {}
+    cache_changed = False
     if uncached_articles:
         batch_points = summarize_with_ai(uncached_articles)
         for point in batch_points:
@@ -1218,10 +1241,13 @@ def summarize_categories_with_ai(
                 "duplicate_of_url": duplicate_url,
             }
             batch_results_by_url[article.url] = entry
-            if use_cache:
+            # Local excerpts are shown now but never remembered, so a later
+            # refresh with a configured AI key summarizes them for real.
+            if use_cache and entry["provider"] != LOCAL_SUMMARY_PROVIDER:
                 cache[article.url] = entry
+                cache_changed = True
 
-        if use_cache:
+        if cache_changed:
             _save_summary_cache(cache)
 
     results_by_category: dict[str, list[dict[str, Any]]] = {}

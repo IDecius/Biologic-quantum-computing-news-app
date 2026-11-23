@@ -81,6 +81,28 @@ avertissements. Deux articles de même thème ne sont pas automatiquement
 considérés comme des doublons; une nouvelle information substantielle doit
 rester visible. La détection se fait uniquement dans une actualisation, pas
 entre les jours.
+### Nombre d’appels IA
+
+Une actualisation envoie **une seule requête** au fournisseur IA pour les trois
+rubriques. Seuls les articles dont l’adresse n’a pas déjà été résumée y sont
+inclus : les résumés précédents sont relus dans
+`%LOCALAPPDATA%\VeilleActualites\summary_cache.json` (les 300 derniers
+articles). Sans nouvel article, aucun appel IA n’est fait. Supprimez ce fichier
+pour forcer de nouveaux résumés.
+
+- Les extraits locaux de secours (sans IA) ne sont jamais enregistrés dans ce
+  fichier : après l’ajout d’une clé, les articles sont résumés par l’IA à
+  l’actualisation suivante.
+- Les doublons sont recherchés entre les articles envoyés ensemble dans la même
+  requête. Un nouvel article n’est donc pas comparé aux articles déjà résumés
+  lors d’une actualisation précédente.
+- Si le modèle oublie certains articles, une seule requête supplémentaire est
+  faite, uniquement pour ceux-là (Groq, Mistral et Gemini). Un indicateur de
+  doublon absent ou invalide ne déclenche pas de nouvelle requête : l’article
+  reste simplement affiché.
+- Seuls les 2 500 premiers caractères du texte de chaque article sont transmis
+  au modèle.
+
 Dans **Variables d’environnement de votre compte** dans Windows, configurez
 les clés que vous possédez :
 
